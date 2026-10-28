@@ -1,0 +1,6 @@
+# Preserve LF for Linux shell scripts after a Windows checkout.
+.cloudbuild/*.sh text eol=lf
+.cloudbuild/*.py text eol=lf
+.cloudbuild/*.md text eol=lf
+java/**/*.md text eol=lf
+java/scripts/*.sh text eol=lf

@@ -1,0 +1,5 @@
+/target/
+/dist/
+/src/main/resources/io/ame/native/**/*.dll
+/src/main/resources/io/ame/native/**/*.so
+/src/main/resources/io/ame/native/**/*.dylib

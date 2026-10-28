@@ -52,7 +52,7 @@ static int utf8_seq_len(const std::string& s, size_t i) {
   uint32_t cp;
   if ((c >> 5) == 0x6) { len = 2; cp = c & 0x1F; }
   else if ((c >> 4) == 0xE) { len = 3; cp = c & 0x0F; }
-  else if ((c >> 3) == 0x2) { len = 4; cp = c & 0x07; }
+  else if ((c >> 3) == 0x1e) { len = 4; cp = c & 0x07; }
   else return 0;
   if (i + len > s.size()) return 0;
   for (int j = 1; j < len; ++j) {

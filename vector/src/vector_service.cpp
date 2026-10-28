@@ -32,7 +32,7 @@ static std::vector<uint32_t> utf8_decode(const std::string& s) {
     if (c < 0x80) { cp = c; len = 1; }
     else if ((c >> 5) == 0x6) { cp = c & 0x1F; len = 2; }
     else if ((c >> 4) == 0xE) { cp = c & 0x0F; len = 3; }
-    else if ((c >> 3) == 0x2) { cp = c & 0x07; len = 4; }
+    else if ((c >> 3) == 0x1e) { cp = c & 0x07; len = 4; }
     else { cp = 0xFFFD; len = 1; }
     for (size_t j = 1; j < len && i + j < s.size(); ++j)
       cp = (cp << 6) | ((unsigned char)s[i + j] & 0x3F);

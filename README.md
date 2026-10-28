@@ -16,6 +16,12 @@
 [docs/engineering/联想记忆引擎_工程实现与优化文档.md](docs/engineering/联想记忆引擎_工程实现与优化文档.md)（实现与迭代记录）。
 文档索引见 [docs/README.md](docs/README.md)。
 
+Linux x86_64 Java Agent 可通过 Maven 构件 `io.ame:ame-java:3.0.0-rc.2`（classifier：`linux-x86_64`，集成候选版）集成。JAR 封装 Java 17+ API、JNI 与 Linux 原生库，在 Agent 进程内运行；接口、构建和验证说明见 [AME Java SDK](java/README.md)。
+
+公司 Linux 流水线构建入口：`sh .cloudbuild/build.sh`。输出带 `linux-x86_64` classifier 的 SDK、真实 JNI 验证日志和校验值，配置方式见 [.cloudbuild/README.md](.cloudbuild/README.md)。
+
+通用对接资料：[接口参考](java/docs/API.md) · [集成指南](java/docs/INTEGRATION.md) · [可运行示例](java/examples/README.md)。
+
 ---
 
 ## 一、架构总览
@@ -204,8 +210,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j8
 ```
 
-Windows 侧源码挂载在 `/mnt/d/agent/memory/ame`（WSL 访问 /mnt 盘构建即可，勿用
-Windows MinGW——工程使用 POSIX 接口 gmtime_r/popen 等）。
+工程面向 Linux 构建和运行，使用 POSIX 接口 `gmtime_r`、`popen` 等。Java SDK 当前支持 Linux x86_64。
 
 ---
 
