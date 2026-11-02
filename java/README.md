@@ -43,7 +43,7 @@ docker buildx build --platform linux/amd64 -f java/Dockerfile \
 
 当前 SDK 只接受 Linux x86_64 JVM；加载器识别 `amd64/x86_64/x64`。JAR 内唯一 native 资源为 `io/ame/native/linux-x86_64/libame_jni.so`，JNI ABI 版本为 **1**。初次加载先校验平台，再读取外置路径或提取 JAR 资源；显式 `ame.native.path` 也不能绕过平台检查。
 
-Linux 运行时需使用兼容的 glibc。流水线默认将 SO 所需最高 glibc 符号版本限制为 `2.36`；实际构建要求以归档 `metadata/build.json`、ELF 记录和 [Linux 验证记录](docs/LINUX-VALIDATION.md) 为准。提高构建上限不等于已经验证目标环境，静态链接 C++ 运行库也不会消除 glibc 依赖；Alpine/musl 不在此运行范围。
+Linux 运行时需满足本次 SO 的实际 glibc 依赖，SDK 不写死 `2.36`。流水线默认仅检测和记录所需版本；只有显式设置 `AME_MAX_GLIBC` 时才执行符号版本上限检查。实际要求见归档 `metadata/build.json` 的 `required_glibc` 和 ELF 记录。面向旧版 Linux 时，应在匹配最低目标环境的工具链/sysroot 中重新构建，并在目标系统验证；修改上限不会降低二进制依赖，静态链接 C++ 运行库也不会消除 glibc 依赖。默认 Docker 示例使用 Debian 12，旧构建的验证数据见 [Linux 验证记录](docs/LINUX-VALIDATION.md)；Alpine/musl 不在此运行范围。
 
 默认加载会将 SO 提取到 `java.io.tmpdir` 下的独立目录，运行环境须允许写临时文件和加载其中的 native library。若临时目录策略不允许加载，可在首次 `open` 前指定匹配的外置 SO：
 

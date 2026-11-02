@@ -223,6 +223,9 @@ static void test_extract_batch() {
   // 乱序/杂行宽容
   auto f2 = LlmAnswerer::parse_extract_batch("前言废话\n[E2]: 只收 E2\n", 2);
   CHECK(f2.size() == 1 && f2[0].first == 1);
+  CHECK(LlmAnswerer::parse_extract_batch(
+      "[E1junk]: invalid\n[E999999999999999999999]: overflow\n[E-1]: negative\n", 3).empty());
+  CHECK(LlmAnswerer::parse_extract_batch("[E1]: valid\n", -1).empty());
 }
 
 int main() {

@@ -18,9 +18,12 @@
 #include "ame/storage/storage.h"
 
 #include <cctype>
+#include <charconv>
 #include <cmath>
-#include <cstdio>
 #include <ctime>
+#include <limits>
+#include <stdexcept>
+#include <string_view>
 
 namespace ame {
 
@@ -47,6 +50,47 @@ static std::string period_of_hour(int h) {
   return "深夜";  // 23~5
 }
 
+static bool parse_clock(std::string_view text, bool closing, int& minutes) {
+  if (text.size() != 5 || text[2] != ':') return false;
+  int hour = 0, minute = 0;
+  const auto h = std::from_chars(text.data(), text.data() + 2, hour);
+  const auto m = std::from_chars(text.data() + 3, text.data() + 5, minute);
+  if (h.ec != std::errc{} || h.ptr != text.data() + 2) return false;
+  if (m.ec != std::errc{} || m.ptr != text.data() + 5) return false;
+  if (hour < 0 || minute < 0 || minute >= 60) return false;
+  if (hour >= 24 && !(closing && hour == 24 && minute == 0)) return false;
+  minutes = hour * 60 + minute;
+  return true;
+}
+
+static bool after_hours(const std::string& hours, const std::tm& local) {
+  if (hours.size() != 11 || hours[5] != '-') return false;
+  int open = 0, close = 0;
+  if (!parse_clock(std::string_view(hours).substr(0, 5), false, open)) return false;
+  if (!parse_clock(std::string_view(hours).substr(6), true, close)) return false;
+  const int current = local.tm_hour * 60 + local.tm_min;
+  const bool in = open <= close ? current >= open && current < close
+                                : current >= open || current < close;
+  return !in;
+}
+
+static double timezone_offset(const std::string& text) {
+  size_t consumed = 0;
+  const double hours = std::stod(text, &consumed);
+  if (consumed != text.size() || !std::isfinite(hours) || std::fabs(hours) > 24)
+    throw std::invalid_argument("Invalid timezone offset");
+  return hours;
+}
+
+static TimePoint apply_offset(TimePoint ts, double hours) {
+  const auto delta = static_cast<TimePoint>(hours * 3600);
+  if (delta > 0 && ts > std::numeric_limits<TimePoint>::max() - delta)
+    throw std::out_of_range("Local timestamp overflow");
+  if (delta < 0 && ts < std::numeric_limits<TimePoint>::min() - delta)
+    throw std::out_of_range("Local timestamp overflow");
+  return ts + delta;
+}
+
 // 地方时投影伪代码：
 //   步骤1：默认时区偏移东八区（+8h），open_hours 置空
 //   步骤2：若传入 place 节点，从其 attrs 读 "tz_offset"（小时偏移）与
@@ -64,27 +108,19 @@ LocalProjection TimeService::project_local(TimePoint ts, const Node* place) cons
   std::string open_hours;
   if (place) {
     auto it = place->attrs.find("tz_offset");
-    if (it != place->attrs.end()) offset_h = std::stod(it->second);
+    if (it != place->attrs.end()) offset_h = timezone_offset(it->second);
     auto oh = place->attrs.find("open_hours");
     if (oh != place->attrs.end()) open_hours = oh->second;
   }
-  lp.local_ts = ts + (TimePoint)(offset_h * 3600);
+  lp.local_ts = apply_offset(ts, offset_h);
   std::time_t t = (std::time_t)lp.local_ts;
   std::tm tm{};
-  gmtime_r(&t, &tm);
+  if (!gmtime_r(&t, &tm)) throw std::out_of_range("Timestamp cannot be projected");
   lp.local_hour = tm.tm_hour;
   lp.period = period_of_hour(tm.tm_hour);
 
   // open_hours "HH:MM-HH:MM" → 打烊后判定
-  if (!open_hours.empty()) {
-    int h1, m1, h2, m2;
-    if (std::sscanf(open_hours.c_str(), "%d:%d-%d:%d", &h1, &m1, &h2, &m2) == 4) {
-      int cur = tm.tm_hour * 60 + tm.tm_min;
-      int o = h1 * 60 + m1, c = h2 * 60 + m2;
-      bool in = (o <= c) ? (cur >= o && cur < c) : (cur >= o || cur < c);
-      lp.after_hours = !in;
-    }
-  }
+  lp.after_hours = after_hours(open_hours, tm);
   return lp;
 }
 

@@ -18,7 +18,7 @@
 
 AME 提供记忆写入和检索证据，应用继续负责用户鉴权、当前上下文、业务规则、模型调用及回答输出。当前 Java API 使用内置规则提取和默认向量实现，没有 embedding/提取器注入、模型调用或远程存储配置入口。
 
-从仓库根目录执行 `sh .cloudbuild/build.sh`，得到 `build/cloudbuild/artifacts/ame-java-linux-x86_64.tar.gz` 及校验文件。解包后使用其中的 JAR 和配套 POM。完整构建、解包与校验命令见 [SDK README](../README.md)。默认构建将所需最高 glibc 符号版本限制为 2.36；实际 SO 要求、构建和测试证据见归档 `metadata/build.json` 及 [Linux 验证记录](LINUX-VALIDATION.md)。部署前仍需在目标镜像、临时目录权限和数据卷上验收。
+从仓库根目录执行 `sh .cloudbuild/build.sh`，得到 `build/cloudbuild/artifacts/ame-java-linux-x86_64.tar.gz` 及校验文件。解包后使用其中的 JAR 和配套 POM。完整构建、解包与校验命令见 [SDK README](../README.md)。构建不强制 glibc 2.36，默认记录实际所需符号版本；可显式配置 `AME_MAX_GLIBC` 执行上限检查。面向更老的 Linux 时须使用匹配目标的构建环境重新产包。实际 SO 要求、构建和测试证据见归档 `metadata/build.json` 的 `required_glibc` 及 [Linux 验证记录](LINUX-VALIDATION.md)。部署前仍需在目标镜像、临时目录权限和数据卷上验收。
 
 ## 2. 引入依赖
 

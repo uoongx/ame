@@ -253,6 +253,6 @@ java -Dame.native.path=/absolute/path/libame_jni.so -jar your-agent.jar
 
 该属性须在首次 `open()` 前设置；同一类加载器生命周期只加载一次库，之后改属性不会切换已加载的库。SDK 不从自定义环境变量或 HTTP 配置读取此值，也不自动下载缺失的库。
 
-当前交付文件为 `ame-java-3.0.0-rc.2-linux-x86_64.jar`，必须使用 classifier `linux-x86_64` 引用。构建入口是 `sh .cloudbuild/build.sh`，产物、配套 POM 和解包步骤见 [SDK README](../README.md)。Linux 运行时还必须满足实际 SO 的 glibc 要求；默认构建上限为 2.36，实际要求、构建证据及本版本测试结果见 [Linux 验证记录](LINUX-VALIDATION.md) 与归档 `metadata/build.json`。版本号和 Java 字节码目标都不能替代目标系统验证。
+当前交付文件为 `ame-java-3.0.0-rc.2-linux-x86_64.jar`，必须使用 classifier `linux-x86_64` 引用。构建入口是 `sh .cloudbuild/build.sh`，产物、配套 POM 和解包步骤见 [SDK README](../README.md)。Linux 运行时还必须满足实际 SO 的 glibc 要求；构建默认不设置版本上限，仅在显式配置 `AME_MAX_GLIBC` 时检查。实际要求、构建证据及测试结果见 [Linux 验证记录](LINUX-VALIDATION.md) 与归档 `metadata/build.json` 的 `required_glibc`。版本号和 Java 字节码目标都不能替代目标系统验证。
 
 本文以现有六方法 API 为边界。C++ 内部的注册实体、精确查询、时间过滤、修改权重等能力没有因此自动成为 Java 公共接口；应用适配层的 provider、用户缓存和失败回退也不是 SDK 内置配置项。

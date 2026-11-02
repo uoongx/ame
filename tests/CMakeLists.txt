@@ -32,3 +32,12 @@ add_test(NAME test_bench COMMAND test_bench)
 add_executable(test_llm test_llm.cpp)
 target_link_libraries(test_llm PRIVATE ame_llm ame_bench ame_engine)
 add_test(NAME test_llm COMMAND test_llm)
+
+# Command-line parser regression tests (no external service calls).
+add_executable(test_cli_args test_cli_args.cpp)
+target_link_libraries(test_cli_args PRIVATE ame_bench)
+add_test(NAME test_cli_args COMMAND test_cli_args)
+
+add_executable(test_curl_transport test_curl_transport.cpp)
+target_link_libraries(test_curl_transport PRIVATE ame_llm)
+add_test(NAME test_curl_transport COMMAND test_curl_transport)

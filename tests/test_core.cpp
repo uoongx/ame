@@ -2,8 +2,13 @@
  * core 单元测试：uid 生成唯一性、RelType 传导系数、JSON 序列化往返
  */
 #include <unordered_set>
+#include <limits>
+#include <locale>
+#include <stdexcept>
+#include <iomanip>
 
 #include "ame/core/json.h"
+#include "ame/core/log.h"
 #include "ame/core/types.h"
 #include "ame/core/uid.h"
 #include "test_util.hpp"
@@ -66,10 +71,48 @@ static void test_json_roundtrip() {
   CHECK(!ok2);
 }
 
+static void test_json_numbers_and_controls() {
+  for (const auto* invalid : {"1e9999", "NaN", "nan", "inf", "-inf", "12trailing"}) {
+    bool ok = true;
+    Json::parse(invalid, &ok);
+    CHECK(!ok);
+  }
+  for (double value : {std::numeric_limits<double>::infinity(),
+                       std::numeric_limits<double>::quiet_NaN()}) {
+    bool rejected = false;
+    try { Json::number(value).dump(); } catch (const std::invalid_argument&) { rejected = true; }
+    CHECK(rejected);
+  }
+  struct DecimalComma : std::numpunct<char> {
+    char do_decimal_point() const override { return ','; }
+  };
+  const auto old_locale = std::locale();
+  std::locale::global(std::locale(old_locale, new DecimalComma));
+  CHECK(Json::number(1234.5).dump() == "1234.5");
+  bool ok = false;
+  CHECK(Json::parse("1234.5", &ok).num == 1234.5);
+  CHECK(ok);
+  std::locale::global(old_locale);
+  CHECK(Json::string(std::string("\0\x01\x1f", 3)).dump() == "\"\\u0000\\u0001\\u001f\"");
+  CHECK(Json::number(1e100).dump() == "1e+100");
+}
+
+static void test_log_message() {
+  CHECK(log_message("count=", 42, ", text=", std::string("100% %s %n"))
+        == "count=42, text=100% %s %n");
+  CHECK(log_message("progress=", std::fixed, std::setprecision(1), 12.34, "%")
+        == "progress=12.3%");
+  const std::string long_text(4096, 'x');
+  CHECK(log_message(long_text) == long_text);
+  CHECK(log_message("", 0, '/', static_cast<size_t>(10)) == "0/10");
+}
+
 int main() {
   test_uid_uniqueness();
   test_conduction_coeff();
   test_rel_name_roundtrip();
   test_json_roundtrip();
+  test_json_numbers_and_controls();
+  test_log_message();
   return AME_TEST_REPORT();
 }

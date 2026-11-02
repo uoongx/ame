@@ -10,20 +10,26 @@
 #include "ame/engine/engine.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <ctime>
+#include <iomanip>
+#include <locale>
+#include <sstream>
 
 namespace ame {
 
 // 日期前缀辅助：epoch 数字 LLM 无法解读，与 CLI 证据打包同格式
-static std::string date_prefix(int64_t ts) {
-  char buf[40] = "";
-  std::time_t t = (std::time_t)ts;
+std::string evidence_date_prefix(int64_t ts) {
+  const std::time_t t = static_cast<std::time_t>(ts);
+  if (static_cast<int64_t>(t) != ts) return {};
   std::tm tm{};
-  gmtime_r(&t, &tm);
-  std::snprintf(buf, sizeof(buf), "[%04d-%02d-%02d] ", tm.tm_year + 1900,
-                tm.tm_mon + 1, tm.tm_mday);
-  return buf;
+  if (!gmtime_r(&t, &tm)) return {};
+  std::ostringstream out;
+  out.imbue(std::locale::classic());
+  out << '[' << std::internal << std::setfill('0')
+      << std::setw(4) << static_cast<int64_t>(tm.tm_year) + 1900 << '-'
+      << std::setw(2) << tm.tm_mon + 1 << '-'
+      << std::setw(2) << tm.tm_mday << "] ";
+  return out.str();
 }
 
 // ---- 1.x 适配器 ----
@@ -38,7 +44,7 @@ StoreAnswer GraphStore::answer_question(const BenchQuestion& q, const BenchConfi
     const Node* n = engine_->storage().get_node(uid);
     if (!n) continue;
     StoreEvidence ev;
-    ev.text = date_prefix(n->ts) + n->text;
+    ev.text = evidence_date_prefix(n->ts) + n->text;
     ev.ts = n->ts;
     std::string prev_text, next_text;
     for (auto& [ed, nb] : engine_->storage().neighbors(uid, {RelType::NEXT})) {

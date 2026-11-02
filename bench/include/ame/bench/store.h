@@ -18,6 +18,9 @@ namespace ame {
 
 class Engine;
 
+// UTC prefix for evidence shown to a model; omit the prefix if the timestamp is invalid.
+std::string evidence_date_prefix(int64_t ts);
+
 // 一次取证召回的逐条证据
 struct StoreEvidence {
   std::string text;      // 证据文本（日期前缀 + 原文，可直接喂 LLM）
@@ -44,7 +47,7 @@ class IStore {
 // 摄入时 dia_id 落在事件 attrs）
 class GraphStore final : public IStore {
  public:
-  explicit GraphStore(Engine* engine) : engine_(engine_) {}
+  explicit GraphStore(Engine* engine) : engine_(engine) {}
   IngestStats ingest_case(const BenchCase& c) override;
   StoreAnswer answer_question(const BenchQuestion& q, const BenchConfig& cfg) override;
   Engine& engine() { return *engine_; }

@@ -29,7 +29,11 @@ public final class AmeEngineBoundaryTest {
     Path root = Files.createDirectory(base.resolve("native-boundary-" + System.nanoTime()));
     unicodeAndDirectoryLock(root);
     corruptedSnapshots(root);
+    invalidSnapshotFields(root);
+    jsonGrammarSnapshots(root);
+    malformedUtf8Snapshots(root);
     escapedUnicodeSnapshot(root);
+    unicodeScalarBoundaries(root);
     failedCloseReleasesDirectory(root);
     concurrentNativeClose(root);
     System.out.println("AME native boundary checks passed: " + root.toAbsolutePath());
@@ -42,11 +46,14 @@ public final class AmeEngineBoundaryTest {
       expectIo(() -> AmeEngine.open(directory));
       engine.rememberTurn("\u6e38\u5ba2\ud83d\ude00", text, 1700000000L, "m", "s");
       check(engine.recall("\u6587\u7269\ud83d\ude80", 10).contains("\\u0000"), "NUL must survive JSON");
-      try {
-        engine.rememberTurn("x", "bad\ud800", 0, "", "");
-        throw new AssertionError("Unpaired UTF-16 surrogate was accepted");
-      } catch (IllegalArgumentException expected) {
-        // A native boundary must reject invalid Unicode before mutating the engine.
+      String before = engine.stats();
+      for (String invalid : List.of("bad\ud800", "\udc00", "\ud800x", "\ud800\ud800")) {
+        try {
+          engine.rememberTurn("x", invalid, 0, "", "");
+          throw new AssertionError("Unpaired UTF-16 surrogate was accepted");
+        } catch (IllegalArgumentException expected) {
+          check(before.equals(engine.stats()), "Invalid Unicode must not mutate the engine");
+        }
       }
     }
     try (AmeEngine engine = AmeEngine.open(directory)) {
@@ -82,12 +89,92 @@ public final class AmeEngineBoundaryTest {
         "{\"graph\":{\"nodes\":[],\"edges\":[]},\"extra\":NaN}",
         "[".repeat(200) + "0" + "]".repeat(200));
     for (int i = 0; i < invalid.size(); i++) {
-      Path directory = Files.createDirectory(root.resolve("corrupt-" + i));
-      Path file = directory.resolve("graph.json");
-      byte[] original = invalid.get(i).getBytes(StandardCharsets.UTF_8);
-      Files.write(file, original);
-      expectIo(() -> AmeEngine.open(directory));
-      check(Arrays.equals(Files.readAllBytes(file), original), "Corrupt snapshot must not be overwritten");
+      rejectSnapshot(root.resolve("corrupt-" + i), invalid.get(i).getBytes(StandardCharsets.UTF_8));
+    }
+  }
+
+  private static void rejectSnapshot(Path directory, byte[] original) throws Exception {
+    Files.createDirectory(directory);
+    Path file = directory.resolve("graph.json");
+    Files.write(file, original);
+    expectIo(() -> AmeEngine.open(directory));
+    check(Arrays.equals(Files.readAllBytes(file), original), "Corrupt snapshot must not be overwritten");
+  }
+
+  private static void invalidSnapshotFields(Path root) throws Exception {
+    String node = "{\"uid\":\"test\",\"kind\":0}";
+    String graph = "{\"nodes\":[" + node + "],\"edges\":[]}";
+    List<String> invalid = List.of(
+        "{\"nodes\":[" + node + "," + node + "],\"edges\":[]}",
+        "{\"nodes\":[{\"uid\":\"test\",\"kind\":8}],\"edges\":[]}",
+        "{\"nodes\":[{\"uid\":\"test\",\"kind\":0,\"ts\":1.5}],\"edges\":[]}",
+        "{\"nodes\":[{\"uid\":\"test\",\"kind\":0,\"embedding\":[1e100]}],\"edges\":[]}",
+        "{\"nodes\":[" + node + "],\"edges\":[{\"from\":\"test\",\"to\":\"missing\",\"type\":\"BAD\"}]}",
+        "{\"nodes\":[" + node + "],\"edges\":[{\"from\":\"test\",\"to\":\"test\",\"type\":\"BAD\"}]}",
+        "{\"graph\":" + graph + ",\"aliases\":{\"bad\":1}}",
+        "{\"graph\":" + graph + ",\"slots\":{\"missing\":[]}}",
+        "{\"graph\":" + graph + ",\"slots\":{\"test\":[{\"slot\":\"x\",\"value\":1}]}}",
+        "{\"graph\":" + graph + ",\"slots\":{\"test\":[{\"slot\":\"x\",\"value\":\"y\",\"valid_from\":1e20}]}}");
+    for (int i = 0; i < invalid.size(); i++) {
+      rejectSnapshot(root.resolve("fields-" + i), invalid.get(i).getBytes(StandardCharsets.UTF_8));
+    }
+  }
+
+  private static void jsonGrammarSnapshots(Path root) throws Exception {
+    String prefix = "{\"nodes\":[],\"edges\":[],\"extra\":";
+    List<String> invalidValues = List.of(
+        "-", "+1", ".1", "1.", "1e", "1e+", "1e-", "1e9999", "0x1", "1 2", "--1", "-01",
+        "trueX", "fals", "nullx", "[1,]", "{\"a\":1,}", "{\"a\":1,\"a\":2}",
+        "\"\\u12x4\"", "\"\\udc00\"", "\"\\ud800\\u0041\"", "\"\\ud800x\"", "\"\u0001\"");
+    for (int i = 0; i < invalidValues.size(); i++) {
+      rejectSnapshot(root.resolve("grammar-" + i),
+          (prefix + invalidValues.get(i) + "}").getBytes(StandardCharsets.UTF_8));
+    }
+    // Exercise every literal/escape and valid number shape alongside the original bare graph format.
+    String valid = prefix + "[true,false,null,{},[],0,-0,-12,1.25,1e+2,-2E-2,"
+        + "\"\\\"\\\\\\/\\b\\f\\n\\r\\t\\u0000\"]}";
+    Path directory = Files.createDirectory(root.resolve("grammar-valid"));
+    Files.writeString(directory.resolve("graph.json"), valid);
+    try (AmeEngine engine = AmeEngine.open(directory)) {
+      engine.stats();
+    }
+  }
+
+  private static void malformedUtf8Snapshots(Path root) throws Exception {
+    List<byte[]> invalid = List.of(
+        new byte[] {(byte) 0x80},
+        new byte[] {(byte) 0xc0, (byte) 0xaf},
+        new byte[] {(byte) 0xc2, 0x20},
+        new byte[] {(byte) 0xe0, (byte) 0x80, (byte) 0x80},
+        new byte[] {(byte) 0xed, (byte) 0xa0, (byte) 0x80},
+        new byte[] {(byte) 0xf0, (byte) 0x80, (byte) 0x80, (byte) 0x80},
+        new byte[] {(byte) 0xf4, (byte) 0x90, (byte) 0x80, (byte) 0x80},
+        new byte[] {(byte) 0xf5, (byte) 0x80, (byte) 0x80, (byte) 0x80},
+        new byte[] {(byte) 0xff},
+        new byte[] {(byte) 0xf0, (byte) 0x90});
+    byte[] prefix = "{\"nodes\":[],\"edges\":[],\"extra\":\"".getBytes(StandardCharsets.UTF_8);
+    for (int i = 0; i < invalid.size(); i++) {
+      byte[] sequence = invalid.get(i);
+      byte[] snapshot = Arrays.copyOf(prefix, prefix.length + sequence.length + 2);
+      System.arraycopy(sequence, 0, snapshot, prefix.length, sequence.length);
+      snapshot[snapshot.length - 2] = '"';
+      snapshot[snapshot.length - 1] = '}';
+      rejectSnapshot(root.resolve("utf8-" + i), snapshot);
+    }
+    byte[] truncated = Arrays.copyOf(prefix, prefix.length + 1);
+    truncated[truncated.length - 1] = (byte) 0xf0;
+    rejectSnapshot(root.resolve("utf8-truncated"), truncated);
+  }
+
+  private static void unicodeScalarBoundaries(Path root) throws Exception {
+    String text = "Unicode:\u007f\u0080\u07ff\u0800\ud7ff\ue000\uffff\ud800\udc00\udbff\udfff";
+    Path directory = root.resolve("unicode-boundaries");
+    try (AmeEngine engine = AmeEngine.open(directory)) {
+      engine.rememberTurn("user", text, 1700000000L, "m", "s");
+      check(engine.recall("Unicode", 10).contains(text), "UTF-16 to UTF-8 scalar boundaries");
+    }
+    try (AmeEngine engine = AmeEngine.open(directory)) {
+      check(engine.recall("Unicode", 10).contains(text), "Snapshot UTF-8 scalar boundaries");
     }
   }
 

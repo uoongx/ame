@@ -7,6 +7,8 @@
  */
 #include "ame/core/log.h"
 
+#include <cstdio>
+
 namespace ame {
 
 static LogLevel g_level = LogLevel::Info;

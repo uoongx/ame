@@ -6,11 +6,12 @@
  *   缓存：请求哈希 → cache_dir/<hash>.txt，命中直接返回（断点续跑零重复扣费）；
  *   重试：429/5xx/传输失败指数退避（1/2/4/8/16s，最多 5 次），其余 4xx 立即失败；
  *   并发：chat_batch 用固定线程池 + 原子工作索引。
- * 关键算法/数据结构：FNV-1a 64 位哈希做缓存键；临时文件用 mkstemp。
+ * 关键算法/数据结构：FNV-1a 64 位哈希做缓存键；临时文件用 mkostemp + CLOEXEC。
  * 依赖关系：依赖 core(json.h) 做响应解析；被 components 与 bench 依赖。
  * 安全约束：api_key 只写入临时 curl 配置文件（0600 权限），不打印、不拼进命令行字符串。
  */
 #include "ame/llm/llm.h"
+#include "curl_transport.h"
 
 #include "ame/core/json.h"
 #include "ame/core/log.h"
@@ -19,6 +20,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
+#include <locale>
 #include <sstream>
 #include <thread>
 #include <unistd.h>
@@ -32,48 +35,6 @@ static uint64_t fnv64(const std::string& s) {
   return h;
 }
 
-// curl 子进程传输伪代码：
-//   步骤1：请求体写入临时文件 body.json（避免 shell 转义问题）；
-//   步骤2：curl 配置写入临时文件（含 Authorization 头，0600 权限，key 不进命令行）；
-//   步骤3：popen 执行 curl（-sS 静默、-m 120 超时、-w 追加 HTTP 状态码），读取全部输出；
-//   步骤4：拆分响应体与状态码返回；临时文件删除。
-static int curl_transport(const std::string& base_url, const std::string& api_key,
-                          const std::string& body, std::string* out) {
-  char body_path[] = "/tmp/ame_llm_body_XXXXXX";
-  char conf_path[] = "/tmp/ame_llm_conf_XXXXXX";
-  int bfd = mkstemp(body_path);
-  int cfd = mkstemp(conf_path);
-  if (bfd < 0 || cfd < 0) return 0;
-  {
-    std::ofstream bf(body_path);
-    bf << body;
-    std::ofstream cf(conf_path);
-    cf << "header = \"Authorization: Bearer " << api_key << "\"\n";
-    cf << "header = \"Content-Type: application/json\"\n";
-  }
-  close(bfd);
-  close(cfd);
-  // 注意：格式串必须保持反斜杠-n 两字面字符（C 串 \\n），由 curl 自行解释——
-  // 若用 C 转义 '\n'，运行时串内嵌真实换行，cmd.exe 按空白切分会毁掉 -w 参数
-  // （WSL/sh 下引号保护换行所以历史正常；原生 Windows 下此前一律 http 0）。
-  std::string cmd = "curl -sS -m 120 -K " + std::string(conf_path) + " -X POST " + base_url +
-                    "/chat/completions --data @" + body_path + " -w \"\\n%{http_code}\"";
-  std::string raw;
-  FILE* fp = popen(cmd.c_str(), "r");
-  if (fp) {
-    char buf[4096];
-    while (size_t n = fread(buf, 1, sizeof(buf), fp)) raw.append(buf, n);
-  }
-  int rc = fp ? pclose(fp) : -1;
-  std::remove(body_path);
-  std::remove(conf_path);
-  if (rc != 0 || raw.empty()) return 0;
-  size_t nl = raw.rfind('\n');
-  if (nl == std::string::npos) return 0;
-  *out = raw.substr(0, nl);
-  return std::atoi(raw.c_str() + nl + 1);
-}
-
 DeepSeekClient::DeepSeekClient(std::string base_url, std::string api_key, std::string model,
                                std::string cache_dir)
     : base_url_(std::move(base_url)),
@@ -81,7 +42,7 @@ DeepSeekClient::DeepSeekClient(std::string base_url, std::string api_key, std::s
       model_(std::move(model)),
       cache_dir_(std::move(cache_dir)) {
   transport_ = [this](const std::string& body, std::string* out) {
-    return curl_transport(base_url_, api_key_, body, out);
+    return detail::curl_transport(base_url_, api_key_, body, out);
   };
 }
 
@@ -92,9 +53,10 @@ std::string DeepSeekClient::cache_key(const std::vector<ChatMessage>& messages,
   for (auto& m : messages) { s += "\n" + m.role + ":" + m.content; }
   s += "\nT" + std::to_string(opts.temperature) + "M" + std::to_string(opts.max_tokens) +
        (opts.json ? "J" : "") + (opts.disable_thinking ? "D" : "");
-  char hex[17];
-  std::snprintf(hex, sizeof(hex), "%016llx", (unsigned long long)fnv64(s));
-  return hex;
+  std::ostringstream hex;
+  hex.imbue(std::locale::classic());
+  hex << std::hex << std::setfill('0') << std::setw(16) << fnv64(s);
+  return hex.str();
 }
 
 // build_body 伪代码：用 core Json 组装 OpenAI 兼容请求体（model/messages/温度/max_tokens，
@@ -151,7 +113,7 @@ std::string DeepSeekClient::call_api(const std::vector<ChatMessage>& messages,
       Json j = Json::parse(out, &ok);
       const Json* choices = ok ? j.find("choices") : nullptr;
       if (!choices || choices->arr.empty()) {
-        AME_LOGW("llm: 200 但响应解析失败，body[:200]=%s", out.substr(0, 200).c_str());
+        AME_LOGW("llm: 200 但响应解析失败，body[:200]=", out.substr(0, 200));
         return "";
       }
       const Json* ch = &choices->arr[0];
@@ -168,20 +130,19 @@ std::string DeepSeekClient::call_api(const std::vector<ChatMessage>& messages,
       }
       if (finish == "length" && opts.max_tokens < 32768) {
         opts.max_tokens *= 2;  // 截断自动加大预算重试
-        AME_LOGW("llm: finish_reason=length completion=%ld content[:200]=%s，max_tokens 翻倍重试",
-                 comp, c.substr(0, 200).c_str());
+        AME_LOGW("llm: finish_reason=length completion=", comp, " content[:200]=",
+                 c.substr(0, 200), "，max_tokens 翻倍重试");
         continue;
       }
       if (c.empty())
-        AME_LOGW("llm: 200 但 content 为空，finish_reason=%s completion=%ld",
-                 finish.c_str(), comp);
+        AME_LOGW("llm: 200 但 content 为空，finish_reason=", finish, " completion=", comp);
       return c;
     }
     if (code == 429 || code >= 500 || code == 0) {
-      AME_LOGW("llm: http %d，第 %d 次重试", code, attempt + 1);
+      AME_LOGW("llm: http ", code, "，第 ", attempt + 1, " 次重试");
       continue;
     }
-    AME_LOGE("llm: http %d 不可重试错误，body[:200]=%s", code, out.substr(0, 200).c_str());
+    AME_LOGE("llm: http ", code, " 不可重试错误，body[:200]=", out.substr(0, 200));
     return "";
   }
   return "";

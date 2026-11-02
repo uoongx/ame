@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <sstream>
 
 namespace ame {
@@ -164,8 +165,8 @@ std::vector<Extraction> LlmExtractor::extract_session(
       }
     }
     if (arr.arr.size() != turns.size())
-      AME_LOGW("LlmExtractor: 数组长度 %zu 与轮数 %zu 不符，缺失轮回退规则提取",
-               arr.arr.size(), turns.size());
+      AME_LOGW("LlmExtractor: 数组长度 ", arr.arr.size(), " 与轮数 ", turns.size(),
+               " 不符，缺失轮回退规则提取");
   } else {
     AME_LOGW("LlmExtractor: 解析失败，整会话回退规则提取器");
     for (size_t i = 0; i < turns.size(); ++i) {
@@ -280,6 +281,7 @@ ChatRequest LlmAnswerer::build_extract_batch_request(
 std::vector<std::pair<int, std::string>> LlmAnswerer::parse_extract_batch(
     const std::string& resp, int n_evidence) {
   std::vector<std::pair<int, std::string>> out;
+  if (n_evidence <= 0) return out;
   std::vector<bool> seen(n_evidence, false);
   std::istringstream ss(resp);
   std::string line;
@@ -288,7 +290,9 @@ std::vector<std::pair<int, std::string>> LlmAnswerer::parse_extract_batch(
     if (lb == std::string::npos) continue;
     size_t rb = line.find("]:", lb);
     if (rb == std::string::npos) continue;
-    int idx = std::atoi(line.substr(lb + 2, rb - lb - 2).c_str());
+    int idx = 0;
+    const auto parsed = std::from_chars(line.data() + lb + 2, line.data() + rb, idx);
+    if (parsed.ec != std::errc{} || parsed.ptr != line.data() + rb) continue;
     if (idx < 1 || idx > n_evidence || seen[idx - 1]) continue;
     std::string fact = line.substr(rb + 2);
     while (!fact.empty() && (fact.back() == ' ' || fact.back() == '\r')) fact.pop_back();

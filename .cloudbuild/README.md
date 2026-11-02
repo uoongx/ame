@@ -14,7 +14,7 @@ sh .cloudbuild/build.sh
 
 | 构建环境 | 要求 |
 | --- | --- |
-| 系统 | Linux x86_64，glibc；建议采用 Debian 12 构建基线 |
+| 系统 | Linux x86_64，glibc；按目标部署环境选择构建镜像，不固定 glibc 版本 |
 | Java | JDK 17+，含 `java`、`javac` 和 JNI 头文件；Java 字节码固定为 release 17 |
 | C++ | g++，支持 C++17，含可静态链接的 libstdc++ / libgcc；make |
 | CMake | 3.24+，支持 headless JDK 的 JNI 查找 |
@@ -32,7 +32,7 @@ sh .cloudbuild/build.sh
 | `AME_MAVEN_SETTINGS` | Maven 默认 settings | 公司 settings.xml 的绝对路径；不会复制到产物 |
 | `AME_MAVEN_REPO` | Maven 默认本地仓库 | 缓存的绝对路径，流水线应提供可写目录 |
 | `AME_MAVEN_OFFLINE` | `false` | `true` 时传入 Maven `-o`，缺少缓存即失败 |
-| `AME_MAX_GLIBC` | `2.36` | 允许 SO 依赖的最高 glibc 符号版本；超出即失败 |
+| `AME_MAX_GLIBC` | 未设置（无上限） | 可选：允许 SO 依赖的最高 glibc 符号版本，如 `2.28`；设置后超出即失败 |
 
 例如在流水线环境配置好 `JAVA_HOME` 后运行：
 
@@ -43,12 +43,14 @@ AME_MAVEN_REPO=/ci/cache/maven \
 sh .cloudbuild/build.sh
 ```
 
-默认 glibc 上限用于防止更换构建镜像后悄悄提高兼容要求。静态链接 C++ 运行库不会消除 glibc 依赖。若新构建环境要求更高版本，应换回合适的基线镜像，或在确认目标运行环境后显式调整上限，并重新执行目标环境测试。此入口仅支持 x86_64；不支持 Alpine/musl、ARM64 或 Windows 交叉编译。
+默认不设置 glibc 上限，也不要求构建环境必须使用 2.36。脚本始终从实际 ELF 中提取最高 glibc 符号版本，写入 `metadata/build.json` 的 `required_glibc`；未设上限时 `max_glibc` 为 `null`。如需约束部署兼容性，可设置 `AME_MAX_GLIBC=2.28` 等目标版本（支持 `2.<minor>[.<patch>]`），超出即构建失败。
+
+这个变量只检查产物，不会改变编译器的链接结果或自动降低 glibc 依赖。静态链接 C++ 运行库也不会消除 glibc 依赖。支持较老系统时，应使用与目标兼容的构建镜像/工具链，并在该目标环境运行测试。`java/Dockerfile` 默认 Debian 12 仅作为可复现的构建示例，可通过 `AME_BUILD_IMAGE` 指定满足上述工具要求的 Debian/Ubuntu 镜像；它不代表 SDK 强制要求 glibc 2.36，也不保证产物可运行于任意更低版本。此入口仅支持 x86_64；不支持 Alpine/musl、ARM64 或 Windows 交叉编译。
 
 ## 构建与验证
 
 1. 检查平台、工具及参数，在 `build/cloudbuild/runs/` 创建本次唯一目录。
-2. 调用 `java/scripts/build-linux-native.sh` 全新编译 JNI，检查 ELF64/x86_64、JNI 导出、动态依赖和 glibc 上限。
+2. 调用 `java/scripts/build-linux-native.sh` 全新编译 JNI，检查 ELF64/x86_64、JNI 导出及动态依赖，记录实际 glibc 要求；仅在配置上限时执行 glibc 门禁。
 3. 在隔离目录复制 Java 源码，排除源码资源中的旧 DLL/SO/dylib。版本取自 `java/pom.xml`，通过 Maven 打包本次 SO。
 4. 检查 JAR 中仅包含 `io/ame/native/linux-x86_64/libame_jni.so`，且与本次构建 SO 逐字节一致。
 5. 显式运行 `NativeLibraryLoaderTest`、`AmeEngineSmokeTest`、`AmeEngineBoundaryTest`，分别验证平台拒绝策略、真实 JNI 与持久化边界。它们是 Java main，不能把 Maven 的 `Tests run: 0` 当作 JNI 验证。测试 classpath 仅包含测试类和最终 JAR；移除测试子进程的 JVM 注入变量，确保使用 JAR 内 native 资源。
@@ -128,9 +130,11 @@ Java 接口、可插拔上下文与回退用法见 [SDK 集成指南](../java/do
 
 ## 本地验证记录
 
+2026-11-02 已在取消默认 glibc 上限并拆分构建阶段后重新完整执行入口，11 项策略/生命周期测试、17 项 C++ CTest、最终 JAR 的三个测试 main 全部通过。同一归档还在独立 Ubuntu 24.04/JDK21 环境通过 SDK 验证；实际 glibc 依赖随本次 Debian 12 工具链仍为 2.36，`max_glibc` 为 `null`。校验值与日志位置见 [Linux 验证记录](../java/docs/LINUX-VALIDATION.md)。
+
 2026-10-28 已针对 Linux 专用 RC2 在 Debian 12 x86_64 容器中完整执行此入口：OpenJDK 17、g++ 12.2、CMake 3.25.1、Maven 3.9.11，网络关闭、Maven 缓存只读。原生编译、classifier JAR 打包、平台拒绝测试、两个真实 JNI 测试和归档内外 SHA256 校验均通过；SO 所需最高 glibc 符号版本为 2.36。同一归档还在独立 Ubuntu 24.04/JDK21 容器通过 SDK 和示例验证，详见 [Linux 验证记录](../java/docs/LINUX-VALIDATION.md)。公司平台门禁和 Dockerfile 镜像构建流程尚未实跑。
 
-构建入口另有 4 项 Linux 生命周期检查，使用模拟编译失败验证发布文件清理、FAILED 诊断、并发锁和符号链接保护；均已通过，可执行：
+构建入口另有 7 项 glibc 策略检查和 4 项 Linux 生命周期检查，覆盖默认无上限、显式上限、符号版本数值比较、缺失元数据，以及编译失败时的发布文件清理、FAILED 诊断、并发锁和符号链接保护。可执行：
 
 ```sh
 python3 -B .cloudbuild/test_build.py

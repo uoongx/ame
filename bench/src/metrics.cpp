@@ -15,8 +15,10 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdio>
+#include <iomanip>
+#include <locale>
 #include <set>
+#include <sstream>
 
 namespace ame {
 
@@ -148,24 +150,34 @@ void MetricAccumulator::add(const std::string& group, const BenchQuestion& q,
 
 // report 伪代码：逐分组输出一行（题数/平均F1/recall@k/弃答准确率/nugget分/tau-b/judge），
 //   最后输出 OVERALL 汇总行。
+static std::string report_ratio(double sum, int count, int precision = 6,
+                                const char* missing = "-") {
+  if (!count) return missing;
+  std::ostringstream out;
+  out.imbue(std::locale::classic());
+  out << std::fixed << std::setprecision(precision) << sum / count;
+  return out.str();
+}
+
+static void report_line(std::ostream& out, const std::string& name,
+                        const GroupStats& g, bool overall = false) {
+  out << std::left << std::setw(24) << name << std::right
+      << " n=" << std::setw(3) << g.n << std::fixed << std::setprecision(3)
+      << "  F1=" << (g.n ? g.f1_sum / g.n : 0)
+      << "  recall@k=" << report_ratio(g.recall_hits, g.recall_total,
+                                       overall ? 3 : 6, overall ? "0.000" : "-")
+      << "  abstain=" << (g.n ? static_cast<double>(g.abstain_correct) / g.n : 0)
+      << "  nugget=" << report_ratio(g.nugget_sum, g.nugget_n)
+      << "  tau=" << report_ratio(g.tau_sum, g.tau_n)
+      << "  judge=" << report_ratio(g.judge_sum, g.judge_n) << '\n';
+}
+
 std::string MetricAccumulator::report() const {
-  std::string out;
-  char buf[320];
+  std::ostringstream out;
+  out.imbue(std::locale::classic());
   GroupStats total;
   for (auto& [name, g] : groups_) {
-    std::snprintf(buf, sizeof(buf),
-                  "%-24s n=%3d  F1=%.3f  recall@k=%s  abstain=%.3f  nugget=%s  tau=%s  judge=%s\n",
-                  name.c_str(), g.n, g.n ? g.f1_sum / g.n : 0,
-                  g.recall_total
-                      ? (std::to_string((double)g.recall_hits / g.recall_total)).c_str()
-                      : "-",
-                  g.n ? (double)g.abstain_correct / g.n : 0,
-                  g.nugget_n
-                      ? (std::to_string(g.nugget_sum / g.nugget_n)).c_str()
-                      : "-",
-                  g.tau_n ? (std::to_string(g.tau_sum / g.tau_n)).c_str() : "-",
-                  g.judge_n ? (std::to_string(g.judge_sum / g.judge_n)).c_str() : "-");
-    out += buf;
+    report_line(out, name, g);
     total.n += g.n;
     total.f1_sum += g.f1_sum;
     total.recall_hits += g.recall_hits;
@@ -178,18 +190,8 @@ std::string MetricAccumulator::report() const {
     total.judge_sum += g.judge_sum;
     total.judge_n += g.judge_n;
   }
-  std::snprintf(buf, sizeof(buf),
-                "%-24s n=%3d  F1=%.3f  recall@k=%.3f  abstain=%.3f  nugget=%s  tau=%s  judge=%s\n",
-                "OVERALL", total.n, total.n ? total.f1_sum / total.n : 0,
-                total.recall_total ? (double)total.recall_hits / total.recall_total : 0,
-                total.n ? (double)total.abstain_correct / total.n : 0,
-                total.nugget_n ? (std::to_string(total.nugget_sum / total.nugget_n)).c_str()
-                               : "-",
-                total.tau_n ? (std::to_string(total.tau_sum / total.tau_n)).c_str() : "-",
-                total.judge_n ? (std::to_string(total.judge_sum / total.judge_n)).c_str()
-                              : "-");
-  out += buf;
-  return out;
+  report_line(out, "OVERALL", total, true);
+  return out.str();
 }
 
 // report_json 伪代码：分组与总计序列化为 JSON 对象（每组含 n/f1/recall/abstain/nugget/tau/judge）。

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -156,8 +157,8 @@ int build_lexicon_json(ILlmClient& client, const std::vector<std::string>& vocab
   std::vector<std::string> words;
   for (auto& w : words_all)
     if (!have.count(w)) words.push_back(w);
-  AME_LOGI("lexicon: 目标 %zu 词，已蒸馏 %zu，本次新增 %zu", words_all.size(), have.size(),
-           words.size());
+  AME_LOGI("lexicon: 目标 ", words_all.size(), " 词，已蒸馏 ", have.size(),
+           "，本次新增 ", words.size());
   if (words.empty()) {
     write_lexicon(out_path, top_n, entries);
     return 0;
@@ -210,11 +211,11 @@ int build_lexicon_json(ILlmClient& client, const std::vector<std::string>& vocab
       }
     }
     write_lexicon(out_path, top_n, entries);  // 每轮原子落盘
-    AME_LOGI("lexicon: 进度 %zu/%zu 批（%.1f%%），失败批 %d", c1, batches.size(),
-             100.0 * c1 / batches.size(), failed_batches);
+    AME_LOGI("lexicon: 进度 ", c1, "/", batches.size(), " 批（", std::fixed,
+             std::setprecision(1), 100.0 * c1 / batches.size(), "%），失败批 ", failed_batches);
   }
-  AME_LOGI("lexicon: 本次新增 %d 条，总覆盖率 %zu/%zu，失败批 %d", got,
-           have.size() + got, words_all.size(), failed_batches);
+  AME_LOGI("lexicon: 本次新增 ", got, " 条，总覆盖率 ", have.size() + got,
+           "/", words_all.size(), "，失败批 ", failed_batches);
   return got;
 }
 
@@ -290,8 +291,8 @@ int validate_lexicon_json(ILlmClient& client, const std::string& in_path,
   };
 
   const int total_pairs = (int)pending.size();
-  AME_LOGI("validate: 目标 pair %zu（已完成 word %zu），批大小 %d", pending.size(),
-           done.size(), batch);
+  AME_LOGI("validate: 目标 pair ", pending.size(), "（已完成 word ", done.size(),
+           "），批大小 ", batch);
   if (pending.empty()) {
     dump_out();
     return 0;
@@ -390,7 +391,7 @@ int validate_lexicon_json(ILlmClient& client, const std::string& in_path,
       done.insert(w->as_str());
     }
     dump_out();
-    AME_LOGI("validate: 进度 %zu/%zu pair（失败批 %d）", c1, pending.size(), failed_batches);
+    AME_LOGI("validate: 进度 ", c1, "/", pending.size(), " pair（失败批 ", failed_batches, "）");
   }
   // 无 strong 对的词条原样带过（在 in 中且未进 out 的）
   for (auto& e : entries->arr) {
@@ -399,8 +400,8 @@ int validate_lexicon_json(ILlmClient& client, const std::string& in_path,
     out_entries.push(e);
   }
   dump_out();
-  AME_LOGI("validate: 完成 pair %d，失败批 %d（fail-open 保留）", total_pairs,
-           failed_batches);
+  AME_LOGI("validate: 完成 pair ", total_pairs, "，失败批 ", failed_batches,
+           "（fail-open 保留）");
   (void)src_entry;
   return total_pairs;
 }
@@ -467,8 +468,8 @@ int score_word_sims(ILlmClient& client, const std::string& in_path,
       }
   }
   const int total_pairs = (int)pending.size();
-  AME_LOGI("score-sims: 目标 pair %zu（已完成 word %zu），批大小 %d", pending.size(),
-           done.size(), batch);
+  AME_LOGI("score-sims: 目标 pair ", pending.size(), "（已完成 word ", done.size(),
+           "），批大小 ", batch);
   if (pending.empty()) return 0;
 
   std::unordered_map<std::string, std::unordered_map<std::string, double>> scores;
@@ -552,11 +553,10 @@ int score_word_sims(ILlmClient& client, const std::string& in_path,
     wf.close();
     std::remove(out_path.c_str());
     std::rename((out_path + ".tmp").c_str(), out_path.c_str());
-    AME_LOGI("score-sims: 进度 %zu/%zu pair（失败批 %d）", c1, pending.size(),
-             failed_batches);
+    AME_LOGI("score-sims: 进度 ", c1, "/", pending.size(), " pair（失败批 ", failed_batches, "）");
   }
-  AME_LOGI("score-sims: 完成 pair %d，失败批 %d（fail-open 记 5 分）", total_pairs,
-           failed_batches);
+  AME_LOGI("score-sims: 完成 pair ", total_pairs, "，失败批 ", failed_batches,
+           "（fail-open 记 5 分）");
   return total_pairs;
 }
 }  // namespace ame

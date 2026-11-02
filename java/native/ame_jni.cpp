@@ -13,6 +13,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -55,6 +56,69 @@ void append_utf8(std::string& out, uint32_t cp) {
   }
 }
 
+bool high_surrogate(uint32_t cp) { return cp >= 0xd800 && cp <= 0xdbff; }
+bool low_surrogate(uint32_t cp) { return cp >= 0xdc00 && cp <= 0xdfff; }
+uint32_t combine_surrogates(uint32_t high, uint32_t low) {
+  return 0x10000 + ((high - 0xd800) << 10) + (low - 0xdc00);
+}
+
+uint32_t read_utf16(const jchar* chars, jsize length, jsize& position) {
+  const uint32_t cp = chars[position++];
+  if (low_surrogate(cp)) invalid("String contains an unpaired UTF-16 surrogate");
+  if (!high_surrogate(cp)) return cp;
+  if (position == length || !low_surrogate(chars[position]))
+    invalid("String contains an unpaired UTF-16 surrogate");
+  return combine_surrogates(cp, chars[position++]);
+}
+
+struct InvalidUtf8 : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+struct Utf8Prefix {
+  unsigned char first, last, mask;
+  size_t continuation;
+  uint32_t minimum;
+};
+
+Utf8Prefix utf8_prefix(unsigned char first) {
+  static constexpr Utf8Prefix prefixes[] = {
+      {0xc2, 0xdf, 0x1f, 1, 0x80},
+      {0xe0, 0xef, 0x0f, 2, 0x800},
+      {0xf0, 0xf4, 0x07, 3, 0x10000}};
+  for (const auto& prefix : prefixes)
+    if (first >= prefix.first && first <= prefix.last) return prefix;
+  throw InvalidUtf8("Invalid UTF-8 returned by the engine");
+}
+
+// Both snapshot input and JVM output must reject overlong sequences, surrogate
+// code points and values above U+10FFFF using the same decoder.
+uint32_t read_utf8(const std::string& input, size_t& position) {
+  const auto first = static_cast<unsigned char>(input.at(position++));
+  if (first < 0x80) return first;
+  const auto prefix = utf8_prefix(first);
+  if (input.size() - position < prefix.continuation)
+    throw InvalidUtf8("Truncated UTF-8 returned by the engine");
+  uint32_t cp = first & prefix.mask;
+  for (size_t n = 0; n < prefix.continuation; ++n) {
+    const auto next = static_cast<unsigned char>(input[position++]);
+    if ((next & 0xc0) != 0x80) throw InvalidUtf8("Invalid UTF-8 continuation");
+    cp = (cp << 6) | (next & 0x3f);
+  }
+  if (cp < prefix.minimum || cp > 0x10ffff || high_surrogate(cp) || low_surrogate(cp))
+    throw InvalidUtf8("Invalid Unicode scalar value");
+  return cp;
+}
+
+void append_utf16(std::vector<jchar>& out, uint32_t cp) {
+  if (cp <= 0xffff) {
+    out.push_back(static_cast<jchar>(cp));
+    return;
+  }
+  cp -= 0x10000;
+  out.push_back(static_cast<jchar>(0xd800 + (cp >> 10)));
+  out.push_back(static_cast<jchar>(0xdc00 + (cp & 0x3ff)));
+}
+
 // JNI's GetStringUTFChars/NewStringUTF use modified UTF-8, which is not the UTF-8
 // stored by AME. Convert Unicode scalar values explicitly, including emoji and NUL.
 std::string from_java(JNIEnv* env, jstring value, bool optional = false) {
@@ -73,48 +137,14 @@ std::string from_java(JNIEnv* env, jstring value, bool optional = false) {
   } release{env, value, chars};
   std::string out;
   out.reserve(static_cast<size_t>(length));
-  for (jsize i = 0; i < length; ++i) {
-    uint32_t cp = chars[i];
-    if (cp >= 0xd800 && cp <= 0xdbff) {
-      if (i + 1 >= length || chars[i + 1] < 0xdc00 || chars[i + 1] > 0xdfff)
-        invalid("String contains an unpaired UTF-16 surrogate");
-      cp = 0x10000 + ((cp - 0xd800) << 10) + (chars[++i] - 0xdc00);
-    } else if (cp >= 0xdc00 && cp <= 0xdfff) {
-      invalid("String contains an unpaired UTF-16 surrogate");
-    }
-    append_utf8(out, cp);
-  }
+  for (jsize i = 0; i < length;) append_utf8(out, read_utf16(chars, length, i));
   return out;
 }
 
 jstring to_java(JNIEnv* env, const std::string& value) {
   std::vector<jchar> out;
   out.reserve(value.size());
-  for (size_t i = 0; i < value.size();) {
-    const auto first = static_cast<unsigned char>(value[i++]);
-    uint32_t cp = first;
-    int continuation = 0;
-    uint32_t minimum = 0;
-    if (first < 0x80) {}
-    else if (first >= 0xc2 && first <= 0xdf) { cp &= 0x1f; continuation = 1; minimum = 0x80; }
-    else if (first >= 0xe0 && first <= 0xef) { cp &= 0x0f; continuation = 2; minimum = 0x800; }
-    else if (first >= 0xf0 && first <= 0xf4) { cp &= 0x07; continuation = 3; minimum = 0x10000; }
-    else throw std::runtime_error("Invalid UTF-8 returned by the engine");
-    if (i + continuation > value.size()) throw std::runtime_error("Truncated UTF-8 returned by the engine");
-    for (int k = 0; k < continuation; ++k) {
-      const auto next = static_cast<unsigned char>(value[i++]);
-      if ((next & 0xc0) != 0x80) throw std::runtime_error("Invalid UTF-8 continuation");
-      cp = (cp << 6) | (next & 0x3f);
-    }
-    if (cp < minimum || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff))
-      throw std::runtime_error("Invalid Unicode scalar value");
-    if (cp <= 0xffff) out.push_back(static_cast<jchar>(cp));
-    else {
-      cp -= 0x10000;
-      out.push_back(static_cast<jchar>(0xd800 + (cp >> 10)));
-      out.push_back(static_cast<jchar>(0xdc00 + (cp & 0x3ff)));
-    }
-  }
+  for (size_t i = 0; i < value.size();) append_utf16(out, read_utf8(value, i));
   if (out.size() > static_cast<size_t>(std::numeric_limits<jsize>::max()))
     throw std::bad_alloc();
   static const jchar empty = 0;
@@ -175,143 +205,137 @@ class SnapshotParser {
   const std::string& input_;
   size_t position_ = 0;
   [[noreturn]] static void fail() { io_error("Invalid JSON in AME graph.json"); }
+  char peek() const { return position_ < input_.size() ? input_[position_] : '\0'; }
+  bool consume(char c) {
+    if (peek() != c) return false;
+    ++position_;
+    return true;
+  }
   void whitespace() {
-    while (position_ < input_.size()) {
-      char c = input_[position_];
-      if (c != ' ' && c != '\t' && c != '\r' && c != '\n') break;
-      ++position_;
-    }
+    static constexpr std::string_view spaces = " \t\r\n";
+    while (spaces.find(peek()) != std::string_view::npos) ++position_;
   }
   bool take(char c) {
     whitespace();
-    if (position_ < input_.size() && input_[position_] == c) { ++position_; return true; }
-    return false;
+    return consume(c);
   }
   static bool digit(char c) { return c >= '0' && c <= '9'; }
   uint32_t hex4() {
+    if (input_.size() - position_ < 4) fail();
     uint32_t result = 0;
-    for (int n = 0; n < 4; ++n) {
-      if (position_ >= input_.size()) fail();
-      char c = input_[position_++];
-      result <<= 4;
-      if (c >= '0' && c <= '9') result |= c - '0';
-      else if (c >= 'a' && c <= 'f') result |= c - 'a' + 10;
-      else if (c >= 'A' && c <= 'F') result |= c - 'A' + 10;
-      else fail();
-    }
+    const char* begin = input_.data() + position_;
+    const auto parsed = std::from_chars(begin, begin + 4, result, 16);
+    if (parsed.ec != std::errc{} || parsed.ptr != begin + 4) fail();
+    position_ += 4;
     return result;
+  }
+  uint32_t unicode_escape() {
+    const uint32_t cp = hex4();
+    if (low_surrogate(cp)) fail();
+    if (!high_surrogate(cp)) return cp;
+    if (input_.compare(position_, 2, "\\u") != 0) fail();
+    position_ += 2;
+    const uint32_t low = hex4();
+    if (!low_surrogate(low)) fail();
+    return combine_surrogates(cp, low);
+  }
+  void escape(std::string& result) {
+    if (position_ == input_.size()) fail();
+    const char c = input_[position_++];
+    if (c == 'u') {
+      append_utf8(result, unicode_escape());
+      return;
+    }
+    static constexpr std::string_view encoded = "\"\\/bfnrt";
+    static constexpr std::string_view decoded = "\"\\/\b\f\n\r\t";
+    const auto index = encoded.find(c);
+    if (index == std::string_view::npos) fail();
+    result += decoded[index];
+  }
+  void character(std::string& result) {
+    if (static_cast<unsigned char>(peek()) < 0x20) fail();
+    if (consume('\\')) {
+      escape(result);
+      return;
+    }
+    try {
+      append_utf8(result, read_utf8(input_, position_));
+    } catch (const InvalidUtf8&) {
+      fail();
+    }
   }
   std::string string() {
     if (!take('"')) fail();
     std::string result;
     while (position_ < input_.size()) {
-      unsigned char c = static_cast<unsigned char>(input_[position_++]);
-      if (c == '"') return result;
-      if (c < 0x20) fail();
-      if (c == '\\') {
-        if (position_ == input_.size()) fail();
-        char escape = input_[position_++];
-        switch (escape) {
-          case '"': case '\\': case '/': result += escape; break;
-          case 'b': result += '\b'; break;
-          case 'f': result += '\f'; break;
-          case 'n': result += '\n'; break;
-          case 'r': result += '\r'; break;
-          case 't': result += '\t'; break;
-          case 'u': {
-            uint32_t cp = hex4();
-            if (cp >= 0xd800 && cp <= 0xdbff) {
-              if (position_ + 2 > input_.size() || input_[position_] != '\\' || input_[position_ + 1] != 'u') fail();
-              position_ += 2;
-              const uint32_t low = hex4();
-              if (low < 0xdc00 || low > 0xdfff) fail();
-              cp = 0x10000 + ((cp - 0xd800) << 10) + (low - 0xdc00);
-            } else if (cp >= 0xdc00 && cp <= 0xdfff) fail();
-            append_utf8(result, cp);
-            break;
-          }
-          default: fail();
-        }
-      } else if (c < 0x80) {
-        result += static_cast<char>(c);
-      } else {
-        uint32_t cp, minimum;
-        int continuation;
-        if (c >= 0xc2 && c <= 0xdf) { cp = c & 0x1f; minimum = 0x80; continuation = 1; }
-        else if (c >= 0xe0 && c <= 0xef) { cp = c & 0x0f; minimum = 0x800; continuation = 2; }
-        else if (c >= 0xf0 && c <= 0xf4) { cp = c & 0x07; minimum = 0x10000; continuation = 3; }
-        else fail();
-        for (int n = 0; n < continuation; ++n) {
-          if (position_ == input_.size()) fail();
-          const auto next = static_cast<unsigned char>(input_[position_++]);
-          if ((next & 0xc0) != 0x80) fail();
-          cp = (cp << 6) | (next & 0x3f);
-        }
-        if (cp < minimum || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) fail();
-        append_utf8(result, cp);
-      }
+      if (consume('"')) return result;
+      character(result);
     }
     fail();
   }
+  void digits() {
+    if (!digit(peek())) fail();
+    do { ++position_; } while (digit(peek()));
+  }
+  void integer() {
+    consume('-');
+    if (!consume('0')) digits();
+  }
+  void exponent() {
+    if (!consume('e') && !consume('E')) return;
+    if (!consume('+')) consume('-');
+    digits();
+  }
   Json number() {
     const size_t start = position_;
-    if (position_ < input_.size() && input_[position_] == '-') ++position_;
-    if (position_ == input_.size()) fail();
-    if (input_[position_] == '0') ++position_;
-    else {
-      if (input_[position_] < '1' || input_[position_] > '9') fail();
-      while (position_ < input_.size() && digit(input_[position_])) ++position_;
-    }
-    if (position_ < input_.size() && input_[position_] == '.') {
-      ++position_;
-      if (position_ == input_.size() || !digit(input_[position_])) fail();
-      while (position_ < input_.size() && digit(input_[position_])) ++position_;
-    }
-    if (position_ < input_.size() && (input_[position_] == 'e' || input_[position_] == 'E')) {
-      ++position_;
-      if (position_ < input_.size() && (input_[position_] == '+' || input_[position_] == '-')) ++position_;
-      if (position_ == input_.size() || !digit(input_[position_])) fail();
-      while (position_ < input_.size() && digit(input_[position_])) ++position_;
-    }
+    integer();
+    if (consume('.')) digits();
+    exponent();
     double result = 0;
     const char* end = input_.data() + position_;
     const auto parsed = std::from_chars(input_.data() + start, end, result);
     if (parsed.ec != std::errc{} || parsed.ptr != end || !std::isfinite(result)) fail();
     return Json::number(result);
   }
+  Json object(int depth) {
+    ++position_;  // value() already matched the opening delimiter.
+    Json result = Json::object();
+    if (take('}')) return result;
+    do {
+      std::string key = string();
+      if (result.find(key) || !take(':')) fail();
+      result[key] = value(depth + 1);
+      if (take('}')) return result;
+    } while (take(','));
+    fail();
+  }
+  Json array(int depth) {
+    ++position_;
+    Json result = Json::array();
+    if (take(']')) return result;
+    do {
+      result.push(value(depth + 1));
+      if (take(']')) return result;
+    } while (take(','));
+    fail();
+  }
+  Json literal(std::string_view word, Json result) {
+    if (input_.compare(position_, word.size(), word) != 0) fail();
+    position_ += word.size();
+    return result;
+  }
   Json value(int depth) {
     if (depth > 128) fail();
     whitespace();
-    if (position_ == input_.size()) fail();
-    if (input_[position_] == '"') return Json::string(string());
-    if (take('{')) {
-      Json result = Json::object();
-      if (take('}')) return result;
-      do {
-        std::string key = string();
-        if (result.find(key) || !take(':')) fail();
-        result[key] = value(depth + 1);
-        if (take('}')) return result;
-      } while (take(','));
-      fail();
+    switch (peek()) {
+      case '"': return Json::string(string());
+      case '{': return object(depth);
+      case '[': return array(depth);
+      case 't': return literal("true", Json::boolean(true));
+      case 'f': return literal("false", Json::boolean(false));
+      case 'n': return literal("null", Json{});
+      default: return number();
     }
-    if (take('[')) {
-      Json result = Json::array();
-      if (take(']')) return result;
-      do {
-        result.push(value(depth + 1));
-        if (take(']')) return result;
-      } while (take(','));
-      fail();
-    }
-    for (const char* literal : {"true", "false", "null"}) {
-      const std::string word(literal);
-      if (input_.compare(position_, word.size(), word) == 0) {
-        position_ += word.size();
-        return word == "null" ? Json{} : Json::boolean(word == "true");
-      }
-    }
-    return number();
   }
 };
 
@@ -342,6 +366,51 @@ void text_field(const Json& object, const char* key) {
   const Json* value = object.find(key);
   if (value && value->kind != Json::Str) io_error("Invalid AME snapshot text field");
 }
+void validate_embedding(const Json* vector) {
+  if (!vector) return;
+  if (vector->kind != Json::Arr) io_error("Invalid AME snapshot embedding");
+  for (const auto& item : vector->arr)
+    if (item.kind != Json::Num || !std::isfinite(item.num) ||
+        std::fabs(item.num) > std::numeric_limits<float>::max())
+      io_error("Invalid AME snapshot embedding value");
+}
+void validate_node(const Json& node, std::unordered_set<std::string>& ids) {
+  const auto& uid = required(node, "uid", Json::Str).str;
+  if (uid.empty() || !ids.insert(uid).second) io_error("Invalid or duplicate AME node identifier");
+  required(node, "kind", Json::Num);
+  numeric_field(node, "kind", true, 0, 7);
+  for (const char* field : {"name", "text", "type", "geohash"}) text_field(node, field);
+  // Staying within +/-2^53 also preserves integer timestamps in AME's JSON numbers.
+  numeric_field(node, "ts", true, -9007199254740991.0, 9007199254740991.0);
+  numeric_field(node, "precision", true, 0, 3);
+  numeric_field(node, "status", true, 0, 1);
+  numeric_field(node, "mention_count", true, 0, std::numeric_limits<int>::max());
+  for (const char* field : {"importance", "lat", "lng"}) numeric_field(node, field);
+  validate_embedding(node.find("embedding"));
+  string_attrs(node.find("attrs"));
+}
+void validate_edge(const Json& edge, const std::unordered_set<std::string>& ids) {
+  if (!ids.count(required(edge, "from", Json::Str).str) ||
+      !ids.count(required(edge, "to", Json::Str).str)) io_error("AME snapshot edge has a missing endpoint");
+  if (!ame::rel_from_name(required(edge, "type", Json::Str).str)) io_error("Invalid AME snapshot relationship");
+  numeric_field(edge, "weight");
+  string_attrs(edge.find("attrs"));
+}
+void validate_slot(const Json& slot) {
+  required(slot, "slot", Json::Str);
+  required(slot, "value", Json::Str);
+  text_field(slot, "src");
+  numeric_field(slot, "valid_from", true, -9007199254740991.0, 9007199254740991.0);
+  numeric_field(slot, "valid_to", true, -9007199254740991.0, 9007199254740991.0);
+}
+void validate_slots(const Json* slots, const std::unordered_set<std::string>& ids) {
+  if (!slots) return;
+  if (slots->kind != Json::Obj) io_error("Invalid AME snapshot slots");
+  for (const auto& pair : slots->obj) {
+    if (!ids.count(pair.first) || pair.second.kind != Json::Arr) io_error("Invalid AME slot owner");
+    for (const auto& slot : pair.second.arr) validate_slot(slot);
+  }
+}
 void validate_snapshot(const Json& root) {
   if (root.kind != Json::Obj) io_error("AME snapshot must be an object");
   const Json* graph = root.find("graph");
@@ -350,48 +419,10 @@ void validate_snapshot(const Json& root) {
   const auto& nodes = required(*graph, "nodes", Json::Arr);
   const auto& edges = required(*graph, "edges", Json::Arr);
   std::unordered_set<std::string> ids;
-  for (const auto& node : nodes.arr) {
-    const auto& uid = required(node, "uid", Json::Str).str;
-    if (uid.empty() || !ids.insert(uid).second) io_error("Invalid or duplicate AME node identifier");
-    required(node, "kind", Json::Num);
-    numeric_field(node, "kind", true, 0, 7);
-    for (const char* field : {"name", "text", "type", "geohash"}) text_field(node, field);
-    // Staying within +/-2^53 also preserves integer timestamps in AME's JSON numbers.
-    numeric_field(node, "ts", true, -9007199254740991.0, 9007199254740991.0);
-    numeric_field(node, "precision", true, 0, 3);
-    numeric_field(node, "status", true, 0, 1);
-    numeric_field(node, "mention_count", true, 0, std::numeric_limits<int>::max());
-    for (const char* field : {"importance", "lat", "lng"}) numeric_field(node, field);
-    if (const Json* vector = node.find("embedding")) {
-      if (vector->kind != Json::Arr) io_error("Invalid AME snapshot embedding");
-      for (const auto& item : vector->arr)
-        if (item.kind != Json::Num || !std::isfinite(item.num) ||
-            std::fabs(item.num) > std::numeric_limits<float>::max())
-          io_error("Invalid AME snapshot embedding value");
-    }
-    string_attrs(node.find("attrs"));
-  }
-  for (const auto& edge : edges.arr) {
-    if (!ids.count(required(edge, "from", Json::Str).str) ||
-        !ids.count(required(edge, "to", Json::Str).str)) io_error("AME snapshot edge has a missing endpoint");
-    if (!ame::rel_from_name(required(edge, "type", Json::Str).str)) io_error("Invalid AME snapshot relationship");
-    numeric_field(edge, "weight");
-    string_attrs(edge.find("attrs"));
-  }
+  for (const auto& node : nodes.arr) validate_node(node, ids);
+  for (const auto& edge : edges.arr) validate_edge(edge, ids);
   string_attrs(root.find("aliases"));
-  if (const Json* slots = root.find("slots")) {
-    if (slots->kind != Json::Obj) io_error("Invalid AME snapshot slots");
-    for (const auto& pair : slots->obj) {
-      if (!ids.count(pair.first) || pair.second.kind != Json::Arr) io_error("Invalid AME slot owner");
-      for (const auto& slot : pair.second.arr) {
-        required(slot, "slot", Json::Str);
-        required(slot, "value", Json::Str);
-        text_field(slot, "src");
-        numeric_field(slot, "valid_from", true, -9007199254740991.0, 9007199254740991.0);
-        numeric_field(slot, "valid_to", true, -9007199254740991.0, 9007199254740991.0);
-      }
-    }
-  }
+  validate_slots(root.find("slots"), ids);
 }
 
 // One writable engine per directory, across JVMs as well as within this JVM.

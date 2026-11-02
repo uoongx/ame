@@ -7,6 +7,8 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <locale>
 
 #include "ame/bench/bench.h"
 #include "ame/bench/metrics.h"
@@ -93,6 +95,61 @@ static void test_metrics_known_values() {
   CHECK_NEAR(order_tau_b("bought travel insurance, reserved a hotel, booked a flight",
                          {"booked a flight", "reserved a hotel", "bought travel insurance"}),
              -1.0, 1e-9);
+}
+
+static void test_report_formatting() {
+  MetricAccumulator empty;
+  CHECK(empty.report() == "OVERALL" + std::string(17, ' ')
+      + " n=  0  F1=0.000  recall@k=0.000  abstain=0.000  nugget=-  tau=-  judge=-\n");
+
+  BenchQuestion question;
+  question.answer = "one two";
+  question.evidence_dia_ids = {"D1"};
+  question.nuggets = {"one"};
+  question.qtype = "event_ordering";
+  AnswerResult result;
+  result.answer_text = "one";
+  result.evidence_dia_ids = {"D1"};
+  MetricAccumulator accumulator;
+  accumulator.add("group", question, result, 0.5);
+  const std::string expected = "group" + std::string(19, ' ')
+      + " n=  1  F1=0.667  recall@k=1.000000  abstain=1.000"
+        "  nugget=1.000000  tau=0.000000  judge=0.500000\n"
+      + "OVERALL" + std::string(17, ' ')
+      + " n=  1  F1=0.667  recall@k=1.000  abstain=1.000"
+        "  nugget=1.000000  tau=0.000000  judge=0.500000\n";
+  CHECK(accumulator.report() == expected);
+
+  struct DecimalComma : std::numpunct<char> {
+    char do_decimal_point() const override { return ','; }
+  };
+  const auto old_locale = std::locale();
+  std::locale::global(std::locale(old_locale, new DecimalComma));
+  CHECK(accumulator.report() == expected);
+  std::locale::global(old_locale);
+
+  MetricAccumulator long_name;
+  const std::string name(400, 'x');
+  long_name.add(name, question, result);
+  const auto report = long_name.report();
+  CHECK(report.find(name + " n=  1  F1=0.667") == 0);
+  CHECK(report.find("  judge=-\nOVERALL") != std::string::npos);
+
+  MetricAccumulator no_evidence;
+  question.evidence_dia_ids.clear();
+  question.nuggets.clear();
+  question.qtype.clear();
+  no_evidence.add("missing", question, result);
+  CHECK(no_evidence.report().find("recall@k=-  abstain=1.000  nugget=-  tau=-  judge=-\n")
+        != std::string::npos);
+}
+
+static void test_evidence_date_prefix() {
+  CHECK(evidence_date_prefix(0) == "[1970-01-01] ");
+  CHECK(evidence_date_prefix(-1) == "[1969-12-31] ");
+  CHECK(evidence_date_prefix(951782400) == "[2000-02-29] ");
+  CHECK(evidence_date_prefix(1700000000) == "[2023-11-14] ");
+  CHECK(evidence_date_prefix(std::numeric_limits<int64_t>::max()).empty());
 }
 
 static void test_abstention_gate() {
@@ -579,6 +636,8 @@ int main() {
   test_load_fixtures();
   test_ingest_graph();
   test_metrics_known_values();
+  test_report_formatting();
+  test_evidence_date_prefix();
   test_abstention_gate();
   test_knowledge_update();
   test_order_events();

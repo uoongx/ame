@@ -11,10 +11,11 @@
  *       [--limit N] [--k 10] [--concurrency 8] [--model deepseek-v4-flash]
  *       [--cache-dir bench/cache] [--config bench/config/deepseek.local.json] [--out report.json]
  */
+#include "args.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -34,92 +35,8 @@ using namespace ame;
 
 namespace {
 
-// 命令行参数 → BenchConfig + dataset/data/limit
-struct Cli {
-  BenchConfig cfg;
-  std::string dataset, data;
-  int limit = 0;
-  std::string dump_path;       // --dump：逐题结果 NDJSON 落盘路径
-  std::string build_lexicon;   // --build-lexicon：词频表路径（构建词典后退出）
-  std::string validate_lexicon;  // --validate-lexicon：蒸馏词库 strong 流可互换校验（M2）
-  std::string score_sims;        // --score-sims：词级近似 1-10 打分（第五轮 M3）
-  std::string lexicon_out = "bench/data/lexicon.json";
-  std::string question_ids;    // --question-ids：只评测这些 question_id（JSON 数组）
-  int lexicon_topn = 2000;
-  std::string save_graph;      // --save-graph PATH：摄入后整图（含档案）落 JSON（每 case 一个文件）
-  std::string load_graph;      // --load-graph PATH：直接加载已摄入的图，跳过摄入/提取
-                               // pass1 答题判分→feedback 落盘→pass2 同题单只跑召回对比排序）
-                               // 摄入后、答题前经 load_keyword_dict_cached 加载（查询侧词激活）
-  std::string name_alias;      // --name-alias FILE：人名/专名严等价别名表（names_zh.json，
-                               // 摄入前加载；M3 别名+M1 词面+M2 实体三通道贯通，默认空=关）
-  double entity_pass = -1.0;   // --entity-pass-threshold X：实体通道低置信放行（<0=关=现状）
-  double rerank_guard = -1.0;  // --rerank-guard X：BM25 强命中豁免 LLM 重排（<0=关=现状）
-  std::string cheap_rerank;    // --cheap-rerank PATH：特征逻辑重排器模型 JSON（空=关）
-  std::string rerank_mode;     // --rerank bm25|cheap|llm（3.0 刀5：别名收敛，仅此开关）
-  bool has_final = false;      // --final-alpha/--final-beta：L2 终排混合开关（默认关闭）
-};
-
-// parse_args 伪代码：键值扫描，未知键忽略；--abstain-categories 为逗号分隔整数列表。
-Cli parse_args(int argc, char** argv) {
-  Cli cli;
-  for (int i = 1; i < argc; ++i) {
-    auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
-    std::string a = argv[i];
-    if (a == "--dataset") cli.dataset = next();
-    else if (a == "--data") cli.data = next();
-    else if (a == "--limit") cli.limit = std::atoi(next().c_str());
-    else if (a == "--k") cli.cfg.k = std::atoi(next().c_str());
-    else if (a == "--abstain-threshold") cli.cfg.abstain_threshold = std::atof(next().c_str());
-    else if (a == "--extractor") cli.cfg.extractor_mode = next();
-    else if (a == "--answer") cli.cfg.answer_mode = next();
-    else if (a == "--judge") cli.cfg.judge_mode = next();
-    else if (a == "--concurrency") cli.cfg.concurrency = std::atoi(next().c_str());
-    else if (a == "--model") cli.cfg.model = next();
-    else if (a == "--cache-dir") cli.cfg.cache_dir = next();
-    else if (a == "--config") cli.cfg.config_path = next();
-    else if (a == "--out") cli.cfg.out_json = next();
-    else if (a == "--dump") cli.dump_path = next();
-    else if (a == "--build-lexicon") cli.build_lexicon = next();
-    else if (a == "--validate-lexicon") cli.validate_lexicon = next();
-    else if (a == "--score-sims") cli.score_sims = next();
-    else if (a == "--lexicon-out") cli.lexicon_out = next();
-    else if (a == "--lexicon-topn") cli.lexicon_topn = std::atoi(next().c_str());
-    else if (a == "--question-ids") cli.question_ids = next();
-    else if (a == "--entity-profile") cli.cfg.use_entity_profile = next() != "off";
-    else if (a == "--conditional-normalize")
-      cli.cfg.conditional_normalize = next() != "off";
-    else if (a == "--answer-mode") cli.cfg.answer_mode_agg = next();
-    else if (a == "--agg-prefilter-n") cli.cfg.agg_prefilter_n = std::atoi(next().c_str());
-    else if (a == "--agg-batch") cli.cfg.agg_batch = std::atoi(next().c_str());
-    else if (a == "--save-graph") cli.save_graph = next();
-    else if (a == "--load-graph") cli.load_graph = next();
-    else if (a == "--name-alias") cli.name_alias = next();
-    else if (a == "--entity-pass-threshold") cli.entity_pass = std::atof(next().c_str());
-    else if (a == "--rerank-guard") cli.rerank_guard = std::atof(next().c_str());
-    else if (a == "--cheap-rerank") cli.cheap_rerank = next();
-    else if (a == "--rerank") cli.rerank_mode = next();
-    else if (a == "--final-alpha") {
-      cli.cfg.final_alpha = std::atof(next().c_str());
-      cli.has_final = cli.cfg.final_mix = true;
-    }
-    else if (a == "--final-beta") {
-      cli.cfg.final_beta = std::atof(next().c_str());
-      cli.has_final = cli.cfg.final_mix = true;
-    }
-    else if (a == "--abstain-categories") {
-      cli.cfg.abstention_categories.clear();
-      std::string v = next();
-      size_t p = 0;
-      while (p < v.size()) {
-        size_t comma = v.find(',', p);
-        cli.cfg.abstention_categories.push_back(std::atoi(v.substr(p, comma).c_str()));
-        if (comma == std::string::npos) break;
-        p = comma + 1;
-      }
-    }
-  }
-  return cli;
-}
+using ame::bench_cli::Cli;
+using ame::bench_cli::parse_args;
 
 void usage() {
   std::fprintf(stderr,
@@ -149,7 +66,13 @@ void usage() {
 }  // namespace
 
 int main(int argc, char** argv) {
-  Cli cli = parse_args(argc, argv);
+  Cli cli;
+  try {
+    cli = parse_args(argc, argv);
+  } catch (const std::invalid_argument& error) {
+    std::fprintf(stderr, "Invalid arguments: %s\n", error.what());
+    return 1;
+  }
   cli.cfg.entity_pass_threshold = cli.entity_pass;  // --entity-pass-threshold（默认 -1=现状）
   cli.cfg.rerank_guard = cli.rerank_guard;          // --rerank-guard（默认 -1=关）
   cli.cfg.cheap_rerank_path = cli.cheap_rerank;     // --cheap-rerank（默认空=关）
@@ -402,13 +325,7 @@ int main(int argc, char** argv) {
         AggJob job{(int)(pendings.size()), {}};
         for (int j = 0; j < kept; ++j) {
           const Node* n = cands.events[j].event;
-          char dbuf[32] = "";
-          std::time_t t = (std::time_t)n->ts;
-          std::tm tm{};
-          gmtime_r(&t, &tm);
-          std::snprintf(dbuf, sizeof(dbuf), "[%04d-%02d-%02d] ", tm.tm_year + 1900,
-                        tm.tm_mon + 1, tm.tm_mday);
-          job.evs.push_back(dbuf + n->text);
+          job.evs.push_back(evidence_date_prefix(n->ts) + n->text);
         }
         if (total > kept)
           std::fprintf(stderr, "  [prefilter] %s: 候选 %d → 保留 %d（砍 %d）\n",
@@ -419,13 +336,7 @@ int main(int argc, char** argv) {
         const Node* n = e.storage().get_node(uid);
         if (n) {
           // 可读日期前缀（epoch 数字 LLM 无法解读，时序题需要真实日期）
-          char tsbuf[40] = "";
-          std::time_t t = (std::time_t)n->ts;
-          std::tm tm{};
-          gmtime_r(&t, &tm);
-          std::snprintf(tsbuf, sizeof(tsbuf), "[%04d-%02d-%02d] ", tm.tm_year + 1900,
-                        tm.tm_mon + 1, tm.tm_mday);
-          std::string ev_text = tsbuf + n->text;
+          std::string ev_text = evidence_date_prefix(n->ts) + n->text;
           // 证据打包增强：沿 NEXT 链带前/后一轮上下文（缓解片段信息不足）
           std::string prev_text, next_text;
           for (auto& [ed, nb] : e.storage().neighbors(uid, {RelType::NEXT})) {

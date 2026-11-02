@@ -26,6 +26,9 @@ CLASSIFIER = "linux-x86_64"
 BUNDLE = "ame-java-linux-x86_64.tar.gz"
 NATIVE_ENTRY = "io/ame/native/linux-x86_64/libame_jni.so"
 POM_ENTRY = "META-INF/maven/io.ame/ame-java/pom.xml"
+SDK_TESTS = ("NativeLibraryLoaderTest", "AmeEngineSmokeTest", "AmeEngineBoundaryTest")
+NATIVE_METADATA = ("toolchain.txt", "elf-header.txt", "elf-dynamic.txt", "elf-versions.txt", "elf-exports.txt")
+TOOL_LOGS = ("maven-version", "java-version", "javac-version")
 
 
 def require(condition, message):
@@ -52,6 +55,42 @@ def clear_artifacts(directory):
 
 def stop(signum, _frame):
     raise InterruptedError("Build interrupted by signal " + str(signum))
+
+
+def glibc_version(value):
+    """Compare symbol versions numerically; 2.3 and 2.3.0 represent the same ceiling."""
+    parts = tuple(map(int, value.split(".")))
+    return parts + (0,) * (3 - len(parts))
+
+
+def configured_glibc_limit(env):
+    value = env.get("AME_MAX_GLIBC", "").strip()
+    if not value:
+        return None
+    require(re.fullmatch(r"2\.[0-9]+(?:\.[0-9]+)?", value),
+            "AME_MAX_GLIBC must be 2.<minor>[.<patch>], or unset for no ceiling")
+    return value
+
+
+def required_glibc(version_info, ceiling):
+    versions = re.findall(r"GLIBC_(\d+\.\d+(?:\.\d+)?)", version_info)
+    require(versions, "Could not determine required glibc from the native library")
+    required = max(versions, key=glibc_version)
+    if ceiling is not None:
+        require(glibc_version(required) <= glibc_version(ceiling),
+                "Native library requires glibc " + required + "; configured maximum is " + ceiling)
+    return required
+
+
+def terminate_process_group(process):
+    if process.poll() is not None:
+        return
+    os.killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
 
 
 class Build:
@@ -81,21 +120,36 @@ class Build:
                 if code:
                     raise subprocess.CalledProcessError(code, step)
             finally:
-                if process.poll() is None:
-                    os.killpg(process.pid, signal.SIGTERM)
-                    try:
-                        process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.wait()
+                terminate_process_group(process)
 
     def build(self):
+        self.preflight()
+        source_pom = ROOT / "java" / "pom.xml"
+        version = self.read_project(source_pom)
+        sdk = self.prepare_sources(source_pom)
+        native = self.build_native()
+        jar = self.package_java(sdk, native, version)
+        library = native / "native-build/libame_jni.so"
+        self.verify_jar(jar, library, source_pom)
+        self.run_sdk_tests(sdk, jar)
+        package = self.prepare_package(jar, library, source_pom, native, version)
+        self.publish(package)
+
+    def preflight(self):
         require(platform.machine().lower() in ("x86_64", "amd64"), "Only Linux x86_64 is supported")
+        self.configure_java()
+        self.validate_environment()
+        self.check_tool_versions()
+
+    def configure_java(self):
         java_home = self.env.get("JAVA_HOME")
-        if java_home:
-            for tool in ("java", "javac"):
-                require((Path(java_home) / "bin" / tool).is_file(), "Invalid JAVA_HOME: missing " + tool)
-            self.env["PATH"] = str(Path(java_home) / "bin") + os.pathsep + self.env["PATH"]
+        if not java_home:
+            return
+        for tool in ("java", "javac"):
+            require((Path(java_home) / "bin" / tool).is_file(), "Invalid JAVA_HOME: missing " + tool)
+        self.env["PATH"] = str(Path(java_home) / "bin") + os.pathsep + self.env["PATH"]
+
+    def validate_environment(self):
         for tool in ("sh", "java", "javac", "mvn", "g++", "cmake", "make", "readelf", "nm", "sha256sum", "readlink"):
             require(shutil.which(tool, path=self.env["PATH"]), "Missing build tool: " + tool)
         jobs = self.env.get("AME_BUILD_JOBS", "2")
@@ -103,8 +157,9 @@ class Build:
         self.env["AME_BUILD_JOBS"] = jobs
         offline = self.env.get("AME_MAVEN_OFFLINE", "false")
         require(offline in ("true", "false"), "AME_MAVEN_OFFLINE must be true or false")
-        max_glibc = self.env.get("AME_MAX_GLIBC", "2.36")
-        require(re.fullmatch(r"2\.[0-9]+", max_glibc), "AME_MAX_GLIBC must be 2.<minor>")
+        self.status["max_glibc"] = configured_glibc_limit(self.env)
+
+    def check_tool_versions(self):
         self.execute("cmake-version", ["cmake", "--version"])
         cmake_version = re.search(r"cmake version (\d+)\.(\d+)",
                                   (self.logs / "cmake-version.log").read_text())
@@ -117,7 +172,7 @@ class Build:
             match = re.search(r'(?:version\s+"|javac\s+)(\d+)', version_text)
             require(match and int(match.group(1)) >= 17, tool + " must be version 17 or newer")
 
-        source_pom = ROOT / "java" / "pom.xml"
+    def read_project(self, source_pom):
         project = ET.parse(str(source_pom)).getroot()
         ns = {"m": "http://maven.apache.org/POM/4.0.0"}
         version = project.findtext("m:version", namespaces=ns)
@@ -125,12 +180,18 @@ class Build:
         require(project.findtext("m:groupId", namespaces=ns) == "io.ame"
                 and project.findtext("m:artifactId", namespaces=ns) == "ame-java", "Unexpected Maven coordinates")
         self.status.update(version=version, classifier=CLASSIFIER, java_release=17,
-                           max_glibc=max_glibc, run_id=self.run.name)
-        if shutil.which("git", path=self.env["PATH"]):
-            result = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
-                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=self.env)
-            self.status["git_commit"] = result.stdout.decode().strip() if result.returncode == 0 else "unavailable"
+                           run_id=self.run.name)
+        self.record_git_revision()
+        return version
 
+    def record_git_revision(self):
+        if not shutil.which("git", path=self.env["PATH"]):
+            return
+        result = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=self.env)
+        self.status["git_commit"] = result.stdout.decode().strip() if result.returncode == 0 else "unavailable"
+
+    def prepare_sources(self, source_pom):
         # Isolate Maven output and copy only sources. Old target trees and checked-out native
         # binaries never become inputs; CMake writes only to this fresh run directory.
         sdk = self.run / "java"
@@ -141,18 +202,20 @@ class Build:
             if source.exists():
                 shutil.copytree(str(source), str(sdk / relative),
                                 ignore=shutil.ignore_patterns("*.dll", "*.so", "*.dylib"))
+        return sdk
+
+    def build_native(self):
         native = self.run / "native"
         self.execute("native-build", ["sh", ROOT / "java/scripts/build-linux-native.sh", native])
         header = (native / "elf-header.txt").read_text()
         require("ELF64" in header and "Advanced Micro Devices X86-64" in header, "JNI binary is not ELF64 x86_64")
-        versions = re.findall(r"GLIBC_(\d+\.\d+(?:\.\d+)?)", (native / "elf-versions.txt").read_text())
-        require(versions, "Could not determine required glibc from the native library")
-        required = max(versions, key=lambda value: tuple(map(int, value.split("."))))
-        require(tuple(map(int, required.split("."))) <= tuple(map(int, max_glibc.split("."))),
-                "Native library requires glibc " + required + "; configured maximum is " + max_glibc)
-        self.status["required_glibc"] = required
+        self.status["required_glibc"] = required_glibc(
+            (native / "elf-versions.txt").read_text(), self.status["max_glibc"])
+        return native
+
+    def maven_command(self, sdk, native):
         command = ["mvn", "-B", "-ntp", "-f", sdk / "pom.xml"]
-        if offline == "true":
+        if self.env.get("AME_MAVEN_OFFLINE", "false") == "true":
             command.append("-o")
         for variable, argument in (("AME_MAVEN_SETTINGS", "-s"), ("AME_MAVEN_REPO", "-Dmaven.repo.local=")):
             if self.env.get(variable):
@@ -165,10 +228,14 @@ class Build:
                     command.append(argument + str(path))
         command += ["-Dame.native.resources=" + str(native / "native-build/resources"),
                     "-DskipTests", "package"]
-        self.execute("maven-package", command)
+        return command
+
+    def package_java(self, sdk, native, version):
+        self.execute("maven-package", self.maven_command(sdk, native))
         filename = "ame-java-" + version + "-" + CLASSIFIER + ".jar"
-        jar = sdk / "target" / filename
-        library = native / "native-build/libame_jni.so"
+        return sdk / "target" / filename
+
+    def verify_jar(self, jar, library, source_pom):
         with zipfile.ZipFile(str(jar)) as archive:
             names = archive.namelist()
             require(len(names) == len(set(names)) and archive.testzip() is None, "Invalid JAR archive")
@@ -177,33 +244,38 @@ class Build:
             require(archive.read(NATIVE_ENTRY) == library.read_bytes(), "Packaged JNI differs from the fresh build")
             require(archive.read(POM_ENTRY) == source_pom.read_bytes(), "Embedded POM differs from source POM")
 
+    def run_sdk_tests(self, sdk, jar):
         # These are executable test mains, not JUnit tests. Test the JAR resource loader;
         # target/classes and external native paths must not be used in this classpath.
         test_env = self.env.copy()
         for key in ("JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "CLASSPATH"):
             test_env.pop(key, None)
-        for test in ("NativeLibraryLoaderTest", "AmeEngineSmokeTest", "AmeEngineBoundaryTest"):
+        for test in SDK_TESTS:
             self.execute(test, ["java", "-cp", str(sdk / "target/test-classes") + ":" + str(jar),
                                 "io.ame." + test] + ([] if test == "NativeLibraryLoaderTest" else
                                 [self.run / "test-data" / test]), env=test_env)
 
+    def prepare_package(self, jar, library, source_pom, native, version):
         self.status["step"] = "package-artifacts"
         package = self.run / "package"
         metadata = package / "metadata"
         metadata.mkdir(parents=True)
-        shutil.copy2(str(jar), str(package / filename))
+        shutil.copy2(str(jar), str(package / jar.name))
         shutil.copy2(str(source_pom), str(package / ("ame-java-" + version + ".pom")))
         shutil.copy2(str(library), str(package / "libame_jni.so"))
-        for name in ("toolchain.txt", "elf-header.txt", "elf-dynamic.txt", "elf-versions.txt", "elf-exports.txt"):
+        for name in NATIVE_METADATA:
             shutil.copy2(str(native / name), str(metadata / name))
-        for name in ("maven-version", "java-version", "javac-version", "NativeLibraryLoaderTest", "AmeEngineSmokeTest", "AmeEngineBoundaryTest"):
+        for name in TOOL_LOGS + SDK_TESTS:
             shutil.copy2(str(self.logs / (name + ".log")), str(metadata / (name + ".log")))
         self.status.update(jar_sha256=digest(jar), native_sha256=digest(library),
-                           tests={"NativeLibraryLoaderTest": "PASS", "AmeEngineSmokeTest": "PASS", "AmeEngineBoundaryTest": "PASS"})
+                           tests=dict.fromkeys(SDK_TESTS, "PASS"))
         write_json(metadata / "build.json", dict(self.status, status="VERIFIED", step="complete"))
         files = sorted(path for path in package.rglob("*") if path.is_file())
         (package / "SHA256SUMS").write_text("".join(
             digest(path) + "  " + path.relative_to(package).as_posix() + "\n" for path in files), encoding="utf-8")
+        return package
+
+    def publish(self, package):
         archive_path = self.run / BUNDLE
         with tarfile.open(str(archive_path), "w:gz") as archive:
             for path in sorted(package.rglob("*")):

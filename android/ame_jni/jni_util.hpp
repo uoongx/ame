@@ -14,7 +14,6 @@
 
 #include <android/log.h>
 #include <cstdint>
-#include <cstdio>
 #include <mutex>
 #include <string>
 
@@ -174,9 +173,11 @@ inline std::string jesc(const std::string& s) {
       case '\t': o += "\\t"; break;
       default:
         if ((unsigned char)c < 0x20) {
-          char b[8];
-          std::snprintf(b, sizeof(b), "\\u%04x", c);
-          o += b;
+          constexpr char hex[] = "0123456789abcdef";
+          const auto code = static_cast<unsigned char>(c);
+          o += "\\u00";
+          o += hex[code >> 4];
+          o += hex[code & 0x0f];
         } else {
           o += c;
         }

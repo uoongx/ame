@@ -4,14 +4,18 @@
  *   dump 序列化（递归输出，字符串转义）与 parse 解析
  *   （基于字符指针的递归下降 Parser，覆盖对象/数组/字符串/数字/字面量）。
  * 关键算法/数据结构：递归下降解析；\u 转义仅处理 BMP 并按 UTF-8 编码输出；
- *   数字经 strtod 解析，序列化时整数值（|x|<1e15）按 %lld 整数格式输出。
+ *   数字使用有界、locale 无关的解析；整数值（|x|<1e15）按整数格式输出。
  * 依赖关系：依赖本模块 json.h 与标准库；被需要 JSON 读写的模块（快照/配置/日志）使用。
  */
 #include "ame/core/json.h"
 
 #include <cctype>
 #include <cmath>
-#include <cstdio>
+#include <iomanip>
+#include <locale>
+#include <sstream>
+#include <stdexcept>
+#include <string_view>
 
 namespace ame {
 
@@ -80,9 +84,10 @@ static void dump_esc(const std::string& s, std::string& out) {
       default: break;
     }
     if (c < 0x20) {
-      char buf[8];
-      std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-      out += buf;
+      constexpr char hex[] = "0123456789abcdef";
+      out += "\\u00";
+      out += hex[c >> 4];
+      out += hex[c & 15];
       ++i;
       continue;
     }
@@ -102,20 +107,24 @@ static void dump_esc(const std::string& s, std::string& out) {
 //   步骤1：按 kind 分派——Null/Bool 写字面量；Str 走 dump_esc；
 //   步骤2：Num 若为整数值且 |x|<1e15 用 %lld 输出，否则用 %.9g；
 //   步骤3：Arr/Obj 递归序列化子元素，逗号分隔，方/花括号闭合。
+static void dump_number(double number, std::string& out) {
+  if (!std::isfinite(number)) throw std::invalid_argument("JSON numbers must be finite");
+  double integral;
+  if (std::modf(number, &integral) == 0.0 && std::fabs(number) < 1e15) {
+    out += std::to_string(static_cast<long long>(number));
+    return;
+  }
+  std::ostringstream formatted;
+  formatted.imbue(std::locale::classic());
+  formatted << std::setprecision(9) << number;
+  out += formatted.str();
+}
+
 static void dump_rec(const Json& j, std::string& out) {
   switch (j.kind) {
     case Json::Null: out += "null"; break;
     case Json::Bool: out += j.b ? "true" : "false"; break;
-    case Json::Num: {
-      char buf[32];
-      double r;
-      if (std::modf(j.num, &r) == 0.0 && std::fabs(j.num) < 1e15)
-        std::snprintf(buf, sizeof(buf), "%lld", (long long)j.num);
-      else
-        std::snprintf(buf, sizeof(buf), "%.9g", j.num);
-      out += buf;
-      break;
-    }
+    case Json::Num: dump_number(j.num, out); break;
     case Json::Str: dump_esc(j.str, out); break;
     case Json::Arr: {
       out += '[';
@@ -233,14 +242,23 @@ struct Parser {
     return s;
   }
 
-  // 伪代码：用 strtod 从当前位置解析 double 并推进指针；
-  //   若未消费任何字符（非数字）则置失败并回退为 Null。
+  // 有界解析，拒绝溢出、非有限值和未消费任何字符的输入。
   Json parse_num() {
     Json j; j.kind = Json::Num;
-    char* np = nullptr;
-    j.num = std::strtod(p, &np);
-    if (np == p) { ok = false; j.kind = Json::Null; }
-    p = np;
+    constexpr std::string_view number_chars = "0123456789+-.eE";
+    const char* token_end = p;
+    while (token_end < end && number_chars.find(*token_end) != std::string_view::npos) ++token_end;
+    // Copy only this token, not the remaining document. Classic-locale streams also
+    // support Android's libc++, which may not provide floating-point from_chars.
+    std::istringstream number(std::string(p, token_end));
+    number.imbue(std::locale::classic());
+    number >> std::noskipws >> j.num;
+    if (!number || number.peek() != std::char_traits<char>::eof() || !std::isfinite(j.num)
+        || (p < end && *p == '+')) {
+      ok = false;
+      j.kind = Json::Null;
+    }
+    p = token_end;
     return j;
   }
 

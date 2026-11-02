@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Linux-only lifecycle checks; real native/JAR verification belongs to build.sh."""
+"""Build policy and Linux lifecycle checks; real native/JAR verification belongs to build.sh."""
 
 import contextlib
 import importlib.util
@@ -19,6 +19,44 @@ SPEC = importlib.util.spec_from_file_location(
     "cloudbuild_under_test", Path(__file__).with_name("build.py"))
 BUILD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(BUILD)
+
+
+class GlibcPolicyTest(unittest.TestCase):
+    def test_unset_or_empty_limit_accepts_actual_toolchain_requirement(self):
+        for env in ({}, {"AME_MAX_GLIBC": ""}):
+            with self.subTest(env=env):
+                ceiling = BUILD.configured_glibc_limit(env)
+                self.assertIsNone(ceiling)
+                self.assertEqual(BUILD.required_glibc("GLIBC_2.2.5 GLIBC_2.40 GLIBC_2.9", ceiling), "2.40")
+
+    def test_older_toolchain_does_not_require_glibc_236(self):
+        self.assertEqual(BUILD.required_glibc("GLIBC_2.2.5 GLIBC_2.17", None), "2.17")
+
+    def test_explicit_limit_rejects_newer_symbol_requirement(self):
+        ceiling = BUILD.configured_glibc_limit({"AME_MAX_GLIBC": "2.17"})
+        with self.assertRaisesRegex(ValueError, "requires glibc 2.34; configured maximum is 2.17"):
+            BUILD.required_glibc("GLIBC_2.17 GLIBC_2.34", ceiling)
+
+    def test_explicit_limit_accepts_equal_or_older_requirement(self):
+        for required in ("2.17", "2.34", "2.34.0"):
+            with self.subTest(required=required):
+                self.assertEqual(BUILD.required_glibc("GLIBC_" + required, "2.34"), required)
+
+    def test_patch_version_limit_is_compared_numerically(self):
+        ceiling = BUILD.configured_glibc_limit({"AME_MAX_GLIBC": "2.2.5"})
+        self.assertEqual(BUILD.required_glibc("GLIBC_2.2.5", ceiling), "2.2.5")
+        with self.assertRaisesRegex(ValueError, "configured maximum is 2.2.5"):
+            BUILD.required_glibc("GLIBC_2.3", ceiling)
+
+    def test_invalid_limit_is_rejected_before_native_build(self):
+        for value in ("2", "3.0", "2.36.0.0", "invalid", "2.36 extra"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "AME_MAX_GLIBC"):
+                    BUILD.configured_glibc_limit({"AME_MAX_GLIBC": value})
+
+    def test_missing_glibc_metadata_is_not_treated_as_portability(self):
+        with self.assertRaisesRegex(ValueError, "Could not determine required glibc"):
+            BUILD.required_glibc("GLIBCXX_3.4.29", None)
 
 
 @unittest.skipUnless(platform.system() == "Linux", "Requires Linux flock and symlink semantics")
