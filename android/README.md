@@ -27,6 +27,24 @@
 └────────────────────────────────────────────────┘
 ```
 
+## 会话页面与生命周期
+
+`ChatActivity` 与 `GuideActivity` 共用 `BaseConversationActivity` 的消息发送、
+诊断切换和状态栏逻辑。`MessageAdapter` 统一消息展示，`ConversationImage`
+统一图片采样和内存编码；导览页只保留方案提示词、方案弹窗及布局差异。
+
+`ConversationWorkQueue` 按规范化的会话目录串行执行引擎初始化、调用和关闭。
+页面销毁后跳过未开始的请求及晚到的 UI 更新，已开始的调用完成后关闭引擎；
+同会话重建会排在旧实例关闭之后，不同会话使用独立队列。
+这只协调本进程页面销毁后的重建顺序，不是跨进程目录锁，也不共享引擎实例。
+
+队列与快照顺序的回归测试只需 JDK 17，不依赖 Android SDK、模型或网络。
+从仓库根目录运行：
+
+```sh
+sh android/tests/run-conversation-work-queue-tests.sh
+```
+
 ## JNI 接口（`ame_jni/ame_jni.cpp` ↔ `AmeEngine.java`）
 
 | 方法 | 语义 |
