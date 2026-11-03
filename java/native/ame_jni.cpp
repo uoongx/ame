@@ -122,6 +122,26 @@ void append_utf16(std::vector<jchar>& out, uint32_t cp) {
   out.push_back(static_cast<jchar>(0xdc00 + (cp & 0x3ff)));
 }
 
+class StringCharsGuard final {
+ public:
+  StringCharsGuard(JNIEnv* env, jstring value)
+      : env_(env), value_(value), chars_(env->GetStringChars(value, nullptr)) {
+    if (!chars_) throw PendingJavaException{};
+  }
+  ~StringCharsGuard() noexcept { env_->ReleaseStringChars(value_, chars_); }
+  StringCharsGuard(const StringCharsGuard&) = delete;
+  StringCharsGuard& operator=(const StringCharsGuard&) = delete;
+  StringCharsGuard(StringCharsGuard&&) = delete;
+  StringCharsGuard& operator=(StringCharsGuard&&) = delete;
+
+  const jchar* data() const noexcept { return chars_; }
+
+ private:
+  JNIEnv* const env_;
+  const jstring value_;
+  const jchar* const chars_;
+};
+
 // JNI's GetStringUTFChars/NewStringUTF use modified UTF-8, which is not the UTF-8
 // stored by AME. Convert Unicode scalar values explicitly, including emoji and NUL.
 std::string from_java(JNIEnv* env, jstring value, bool optional = false) {
@@ -130,17 +150,10 @@ std::string from_java(JNIEnv* env, jstring value, bool optional = false) {
     invalid("String argument must not be null");
   }
   const jsize length = env->GetStringLength(value);
-  const jchar* chars = env->GetStringChars(value, nullptr);
-  if (!chars) throw PendingJavaException{};
-  struct Release {
-    JNIEnv* env;
-    jstring value;
-    const jchar* chars;
-    ~Release() { env->ReleaseStringChars(value, chars); }
-  } release{env, value, chars};
+  const StringCharsGuard chars(env, value);
   std::string out;
   out.reserve(static_cast<size_t>(length));
-  for (jsize i = 0; i < length;) append_utf8(out, read_utf16(chars, length, i));
+  for (jsize i = 0; i < length;) append_utf8(out, read_utf16(chars.data(), length, i));
   return out;
 }
 

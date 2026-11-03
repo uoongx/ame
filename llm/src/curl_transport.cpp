@@ -10,8 +10,6 @@
 #include <unistd.h>
 #include <vector>
 
-extern char** environ;
-
 namespace ame::detail {
 namespace {
 
