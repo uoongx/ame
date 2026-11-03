@@ -35,8 +35,8 @@ def main():
     words = {w for w in words if w and not any(ch.isspace() for ch in w[0] + w[-1])}
     out = sorted(words)
     OUT.write_text("\n".join(out) + "\n", encoding="utf-8")
-    print(f"{OUT}: {len(out)} 词（entries={len(data.get('entries', []))}）")
-    print("示例:", out[:10], "...", out[-5:])
+    print(f"{OUT}: {len(out)} words (entries={len(data.get('entries', []))})")
+    print("Samples:", out[:10], "...", out[-5:])
 
 
 if __name__ == "__main__":

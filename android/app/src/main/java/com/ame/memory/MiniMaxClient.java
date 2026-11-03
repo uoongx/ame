@@ -119,9 +119,7 @@ public final class MiniMaxClient {
         try (Response resp = client.newCall(req).execute()) {
             String text = resp.body() != null ? resp.body().string() : "";
             if (!resp.isSuccessful()) {
-                // take(300)：最多取前 300 字符
-                String snippet = text.length() > 300 ? text.substring(0, 300) : text;
-                Log.e(TAG, "MiniMax HTTP " + resp.code() + ": " + snippet);
+                Log.e(TAG, "MiniMax HTTP " + resp.code() + ": responseChars=" + text.length());
                 throw new RuntimeException("MiniMax HTTP " + resp.code());
             }
             JSONObject jo;
@@ -133,7 +131,7 @@ public final class MiniMaxClient {
             JSONObject usage = jo.optJSONObject("usage");
             Log.d(TAG, "MiniMax 200: model=" + BuildConfig.MINIMAX_MODEL
                     + " maxTokens=" + maxTokens + " msgs=" + messages.size()
-                    + " usage=" + (usage != null ? usage.toString() : "无"));
+                    + " usage=" + usageMetadata(usage));
             String content;
             try {
                 content = jo.getJSONArray("choices").getJSONObject(0)
@@ -159,6 +157,28 @@ public final class MiniMaxClient {
         }
     }
 
+    private static String usageMetadata(JSONObject usage) {
+        if (usage == null) return "none";
+        return "promptTokens=" + usage.optLong("prompt_tokens", -1)
+                + " completionTokens=" + usage.optLong("completion_tokens", -1)
+                + " totalTokens=" + usage.optLong("total_tokens", -1)
+                + " inputTokens=" + usage.optLong("input_tokens", -1)
+                + " outputTokens=" + usage.optLong("output_tokens", -1)
+                + " completionReasoningTokens="
+                + usageDetailCount(usage, "completion_tokens_details", "reasoning_tokens")
+                + " outputReasoningTokens="
+                + usageDetailCount(usage, "output_tokens_details", "reasoning_tokens")
+                + " promptCachedTokens="
+                + usageDetailCount(usage, "prompt_tokens_details", "cached_tokens")
+                + " inputCachedTokens="
+                + usageDetailCount(usage, "input_tokens_details", "cached_tokens");
+    }
+
+    private static long usageDetailCount(JSONObject usage, String detailKey, String countKey) {
+        JSONObject details = usage.optJSONObject(detailKey);
+        return details == null ? -1 : details.optLong(countKey, -1);
+    }
+
     /**
      * 全池 LLM 语义重排（bench llm 冻结配置的端侧移植；桌面证据：sample50 覆盖率
      * bm25 0.464 → llm 全池打分 0.672）。一次 chat 调用：prompt 列出编号 1..N 的
@@ -182,12 +202,12 @@ public final class MiniMaxClient {
             resp = chat(java.util.Collections.singletonList(new Msg("user", sb.toString())),
                     512);   // 输出仅编号列表（数十字），512 含思考预算绰绰有余
         } catch (Exception e) {
-            Log.e(TAG, "rerank 调用失败，返回空表由调用方降级", e);
+            Log.e(TAG, "Rerank failed; returning an empty list for caller fallback"
+                    + " errorType=" + e.getClass().getSimpleName());
             return new ArrayList<>();
         }
         List<Integer> ids = parseRerankIds(resp, candidates.size(), topK);
-        Log.d(TAG, "rerank: 候选 " + candidates.size() + " 条 → 选中 " + ids.size()
-                + " 条");
+        Log.d(TAG, "Rerank completed: candidates=" + candidates.size() + " selected=" + ids.size());
         return ids;
     }
 
@@ -284,8 +304,7 @@ public final class MiniMaxClient {
         try (Response response = client.newCall(request).execute()) {
             String text = response.body() != null ? response.body().string() : "";
             if (!response.isSuccessful()) {
-                String snippet = text.length() > 300 ? text.substring(0, 300) : text;
-                Log.e(TAG, "webSearch HTTP " + response.code() + ": " + snippet);
+                Log.e(TAG, "webSearch HTTP " + response.code() + ": responseChars=" + text.length());
                 throw new RuntimeException("webSearch HTTP " + response.code());
             }
             return parseWebSearchResponse(text);
@@ -306,7 +325,7 @@ public final class MiniMaxClient {
         if (output.isEmpty()) output = webSearchFallbackText(response.optJSONArray("output"));
         if (output.isEmpty()) throw new RuntimeException("webSearch 响应无 output_text");
         Log.d(TAG, "webSearch 200: model=" + BuildConfig.MINIMAX_MODEL
-                + " 结果" + output.length() + "字");
+                + " resultChars=" + output.length());
         return stripFunctionCalls(stripThink(output));
     }
 

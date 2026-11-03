@@ -35,10 +35,11 @@ public final class CheapRerank {
             while ((n = in.read(buf)) != -1) bos.write(buf, 0, n);
             String json = new String(bos.toByteArray(), StandardCharsets.UTF_8);
             int r = engine.loadCheapModel(json);
-            Log.i(TAG, r == 1 ? "cheap 重排已默认启用（池60→特征重排→topN）"
-                    : "cheap 模型解析失败，回退引擎原序 rc=" + r);
+            Log.i(TAG, r == 1 ? "Cheap reranker enabled: 60 candidates -> feature reranking -> top N"
+                    : "Cheap model parsing failed; retaining original engine order; rc=" + r);
         } catch (IOException | RuntimeException e) {
-            Log.w(TAG, "cheap 模型加载失败，回退引擎原序: " + e);
+            Log.w(TAG, "Cheap model load failed; retaining original engine order; error_type="
+                    + e.getClass().getSimpleName());
         }
     }
 }

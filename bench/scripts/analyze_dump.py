@@ -49,7 +49,7 @@ n = sum(tot.values())
 print(f"{'ALL':>6} {n:>4}", "  ".join(f"{tot.get(x,0):>18}" for x in CLASSES))
 
 for cls, exs in examples.items():
-    print(f"\n===== {cls} 样例 =====")
+    print(f"\n===== {cls} samples =====")
     for r in exs:
         print("Q:", r["question"][:110])
         print("  gold:", (r["reference_answer"] or "")[:90], "| ans:", r["answer"][:90],

@@ -143,8 +143,8 @@ def main():
                 and not tok.startswith("[") and any(ch.isalnum() for ch in tok)][:30]
         t0[t] = vecs[keep] if keep else np.zeros((0, 384), dtype=np.float32)
         if (i + 1) % 500 == 0:
-            print(f"[wmd] token 向量 {i + 1}/{len(texts)}", flush=True)
-    print(f"[wmd] 缓存命中 {tvc.hits} 新算 {tvc.misses}")
+            print(f"[wmd] token vectors {i + 1}/{len(texts)}", flush=True)
+    print(f"[wmd] cache hits {tvc.hits}, computed {tvc.misses}")
 
     def wmd(q_text, c_text):
         return wmd_cos(t0[q_text], t0[c_text])
@@ -195,7 +195,7 @@ def main():
                  wc]
             pairs.append((x, y, qid))
     n_pos = sum(y for _, y, _ in pairs)
-    print(f"[train] 对 {len(pairs)}（正例 {n_pos}）题 {len(set(q for _, _, q in pairs))}")
+    print(f"[train] pairs {len(pairs)} (positive {n_pos}) questions {len(set(q for _, _, q in pairs))}")
 
     # ---- 同折 5-fold CV：base(11) vs wmd(12) ----
     qids_l = sorted(set(q for _, _, q in pairs))
@@ -273,12 +273,13 @@ def main():
     cw, aw, _ = replay(wmd_model, True)
     print(f"[replay] cheap {cb:.3f} (any-hit {ab_}/{nb}) vs cheap+wmd {cw:.3f} "
           f"(any-hit {aw}/{nb}) Δ={cw - cb:+.3f}")
-    print("[wmd模型权重]", {k: round(v, 3) for k, v in zip(wmd_model["features"], w)},
+    print("[wmd model weights]", {k: round(v, 3) for k, v in zip(wmd_model["features"], w)},
           "bias", round(b, 3))
 
     # ---- 附带测量：tau vs 教师 + 与 svec_cos 相关 ----
     import re
-    rx = re.compile(r"\[llm-rerank\]\s+(\S+?):\s+LLM 置顶 .*?\| 选中: (.*?) \| 候选: (.*)$")
+    rx = re.compile(r"\[llm-rerank\]\s+(\S+?):\s+LLM (?:置顶|promoted) .*?\| "
+                    r"(?:选中|selected): (.*?) \| (?:候选|candidates): (.*)$")
     llm_sel = {}
     for lp in args.log:
         for line in open(ROOT / lp, encoding="utf-8", errors="replace"):
@@ -317,9 +318,9 @@ def main():
     taus_w = [t[1] for t in tau_rows if t[1] == t[1]]
     taus_s = [t[2] for t in tau_rows if t[2] == t[2]]
     corr = [c for c in corr_rows if c == c]
-    print(f"[tau] wmd vs 教师选中集 {len(taus_w)} 题 平均 "
-          f"{sum(taus_w)/len(taus_w):+.3f}（svec 参照 {sum(taus_s)/len(taus_s):+.3f}）")
-    print(f"[corr] wmd_cos vs svec_cos 逐题 Pearson 平均 {sum(corr)/len(corr):+.3f}（n={len(corr)}）")
+    print(f"[tau] wmd vs teacher-selected set: {len(taus_w)} questions, mean "
+          f"{sum(taus_w)/len(taus_w):+.3f} (svec reference {sum(taus_s)/len(taus_s):+.3f})")
+    print(f"[corr] wmd_cos vs svec_cos mean per-question Pearson {sum(corr)/len(corr):+.3f} (n={len(corr)})")
 
     with open(out_dir / "wmd_results.json", "w", encoding="utf-8") as f:
         json.dump({"cv_base_auc": sum(res["base"]) / 5, "cv_wmd_auc": sum(res["wmd"]) / 5,

@@ -38,10 +38,10 @@ int main() {
     double t0 = now();
     int n = ext.load_keyword_dict(dict, "seg", cap);
     double t1 = now();
-    if (n < 0) { std::printf("词典缺失，跳过\n"); return 1; }
+    if (n < 0) { std::printf("Dictionary missing, skipping\n"); return 1; }
     size_t nodes, edges, bytes;
     ext.ac_stats(nodes, edges, bytes);
-    std::printf("cap=%7d 构建=%6.2fs 节点=%zu 边=%zu 估算内存=%.1fMB\n", n, t1 - t0,
+    std::printf("cap=%7d build=%6.2fs nodes=%zu edges=%zu estimated_memory=%.1fMB\n", n, t1 - t0,
                 nodes, edges, bytes / 1048576.0);
     // 内存估计：节点数 × 节点基础开销 + 边数 × 8B
     // （AcNode: vector 24B + fail/out/outlink 12B；边 pair<uint32,int> 8B）
@@ -54,7 +54,7 @@ int main() {
       extract_us += (b - a) * 1e6;
       (void)hits;
     }
-    std::printf("cap=%7d 构建=%6.2fs 提取(4轮)=%7.1fus\n", n, t1 - t0, extract_us);
+    std::printf("cap=%7d build=%6.2fs extract(4 rounds)=%7.1fus\n", n, t1 - t0, extract_us);
     (void)naive_us;
   }
 
@@ -80,9 +80,9 @@ int main() {
     if (ac_set != naive_set) {
       ++bad;
       for (auto& w : ac_set)
-        if (!naive_set.count(w)) std::printf("AC 多出: %s\n", w.c_str());
+        if (!naive_set.count(w)) std::printf("AC extra: %s\n", w.c_str());
       for (auto& w : naive_set)
-        if (!ac_set.count(w)) std::printf("AC 缺少: %s\n", w.c_str());
+        if (!ac_set.count(w)) std::printf("AC missing: %s\n", w.c_str());
     }
   }
   // ---- AC 持久化（70 万词）：构建写缓存 vs 加载缓存 ----
@@ -102,7 +102,7 @@ int main() {
     RuleExtractor ext2;
     int n2 = ext2.load_keyword_dict_cached(dict, "seg", 700000, cache);
     double d = now();
-    std::printf("持久化: 构建+写=%.2fs 加载=%.0fms cache=%.1fMB words=%d/%d\n", b - a,
+    std::printf("Persistence: build+write=%.2fs load=%.0fms cache=%.1fMB words=%d/%d\n", b - a,
                 (d - c) * 1000, fs / 1048576.0, n, n2);
     // 持久化往返命中一致性
     auto h1 = ext.ac_match(samples[0]);
@@ -110,7 +110,7 @@ int main() {
     std::unordered_set<std::string> s1, s2;
     for (auto& [p, w, c2] : h1) s1.insert(w);
     for (auto& [p, w, c2] : h2) s2.insert(w);
-    std::printf("持久化往返命中: %s\n", s1 == s2 ? "一致" : "不一致");
+    std::printf("Persistence round-trip matches: %s\n", s1 == s2 ? "identical" : "different");
   }
 
   // ---- DAT vs AC（70 万词）----
@@ -136,7 +136,7 @@ int main() {
       match_us += (y - x) * 1e6;
       (void)m;
     }
-    std::printf("DAT: 构建=%.2fs 节点=%zu 估算内存=%.1fMB 匹配(4轮)=%.1fms\n", b - a,
+    std::printf("DAT: build=%.2fs nodes=%zu estimated_memory=%.1fMB match(4 rounds)=%.1fms\n", b - a,
                 dat.nodes(), dat.approx_bytes() / 1048576.0, match_us / 1000);
     // DAT vs AC 对拍
     RuleExtractor ext;
@@ -149,14 +149,14 @@ int main() {
       auto dat_set = dat.match(text);
       if (ac_set != dat_set) {
         ++bad;
-        std::printf("对拍不一致: AC=%zu DAT=%zu\n", ac_set.size(), dat_set.size());
+        std::printf("Differential mismatch: AC=%zu DAT=%zu\n", ac_set.size(), dat_set.size());
         for (auto& w : dat_set)
-          if (!ac_set.count(w)) std::printf("  DAT 多出: %s\n", w.c_str());
+          if (!ac_set.count(w)) std::printf("  DAT extra: %s\n", w.c_str());
         for (auto& w : ac_set)
-          if (!dat_set.count(w)) std::printf("  AC 多出: %s\n", w.c_str());
+          if (!dat_set.count(w)) std::printf("  AC extra: %s\n", w.c_str());
       }
     }
-    std::printf("DAT vs AC 对拍: %s\n", bad == 0 ? "一致" : "不一致");
+    std::printf("DAT vs AC differential check: %s\n", bad == 0 ? "identical" : "different");
   }
   return bad ? 2 : 0;
 }

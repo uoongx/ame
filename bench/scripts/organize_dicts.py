@@ -207,12 +207,12 @@ def main():
     n_ent = do_entities()
     with open(f"{OUT}/manifest.json", "w", encoding="utf-8", newline="\n") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=1)
-    print("== 整理汇总 ==")
-    print(f"{'类别':<14}{'词条数':>10}{'解析失败':>10}")
+    print("== Dictionary organization summary ==")
+    print(f"{'category':<14}{'entries':>10}{'parse_fail':>10}")
     for m in manifest:
         print(f"{m['src']:<40} {m['parsed']:>8} {m['failed']:>8}  [{m['encoding']}]")
-    print(f"domain 类别: {n_dom}")
-    print(f"synonyms 组: {n_syn} / segmentation 合并词条: {n_seg} / entities: {n_ent}")
+    print(f"domain categories: {n_dom}")
+    print(f"synonym groups: {n_syn} / merged segmentation entries: {n_seg} / entities: {n_ent}")
 
 if __name__ == "__main__":
     main()

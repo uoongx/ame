@@ -45,7 +45,7 @@ def load_cfg(path):
     key = j.get("api_key") or ""
     base = (j.get("base_url") or "https://api.deepseek.com").rstrip("/")
     if not key:
-        sys.exit("缺少 api_key（bench/config/deepseek.local.json 或 --config）")
+        sys.exit("Missing api_key (bench/config/deepseek.local.json or --config)")
     return base, key, j.get("model", "deepseek-v4-flash")
 
 
@@ -76,8 +76,8 @@ def chat(base, key, model, prompt, max_retries=5):
                 time.sleep(delay)
                 delay *= 2
                 continue
-            raise RuntimeError(f"网络错误: {e}") from e
-    raise RuntimeError("重试耗尽")
+            raise RuntimeError(f"Network error: {type(e).__name__}") from e
+    raise RuntimeError("Retries exhausted")
 
 
 def parse_tags(resp):
@@ -119,9 +119,9 @@ def main():
     try:
         t0 = time.time()
         probe, _ = chat(base, key, model, 'Reply with exactly: ok')
-        print(f"[probe] API 健康: {probe[:20]!r} ({time.time()-t0:.1f}s)")
+        print(f"[probe] API health: response_chars={len(probe)} ({time.time()-t0:.1f}s)")
     except RuntimeError as e:
-        sys.exit(f"[probe] API 探测失败，停止：{e}")
+        sys.exit(f"[probe] API probe failed; stopping: {type(e).__name__}")
 
     data = json.loads(Path(args.inp).read_text(encoding="utf-8"))
     # 拍平轮次清单：(定位路径, 文本)；定位 = (样本下标, session 名, 轮下标)
@@ -140,7 +140,7 @@ def main():
     if args.limit:
         flat = flat[:args.limit]
     total = len(flat)
-    print(f"[load] {args.inp}: {total} 轮待标注")
+    print(f"[load] {args.inp}: {total} turns awaiting annotation")
 
     stats = {"prompt": 0, "completion": 0, "calls": 0, "cache_hits": 0, "failed": 0}
 
@@ -171,7 +171,7 @@ def main():
                 results[(ci, key_s, ti)] = rec["tags"]
             except RuntimeError as e:
                 stats["failed"] += 1
-                print(f"[warn] 单轮标注失败（跳过，不重跑）: {e}", file=sys.stderr)
+                print(f"[warn] Turn annotation failed (skipped without rerun): {type(e).__name__}", file=sys.stderr)
             done += 1
             if done % 50 == 0 or done == total:
                 print(f"[prog] {done}/{total} (calls={stats['calls']} "
@@ -195,18 +195,18 @@ def main():
             tag_n += 1
             if any(w in words for w in re.findall(r"[a-z0-9]{3,}", tg.lower())):
                 viol += 1
-    print(f"\n[done] 增强语料 → {args.out}")
-    print(f"[cost] API 调用 {stats['calls']} 次（缓存命中 {stats['cache_hits']}，失败 {stats['failed']}）"
+    print(f"\n[done] Enriched corpus written to {args.out}")
+    print(f"[cost] API calls {stats['calls']} (cache hits {stats['cache_hits']}, failures {stats['failed']})"
           f" | prompt {stats['prompt']} tok + completion {stats['completion']} tok"
-          f" | 合计 {(stats['prompt']+stats['completion'])/max(1,stats['calls']):.0f} tok/轮")
-    print(f"[qc] 有标签轮 {tagged}/{len(results)} | 标签 {tag_n} 个 | "
-          f"泄漏违规（标签含原句词）{viol}/{tag_n} = {viol/max(1,tag_n):.1%}")
+          f" | total {(stats['prompt']+stats['completion'])/max(1,stats['calls']):.0f} tok/turn")
+    print(f"[qc] tagged turns {tagged}/{len(results)} | tags {tag_n} | "
+          f"leakage violations (tag contains source words) {viol}/{tag_n} = {viol/max(1,tag_n):.1%}")
 
     # ---- 人工可读质检样例 ----
     if args.sample and results:
         rnd = random.Random(args.seed)
         picked = rnd.sample(flat, min(args.sample, len(flat)))
-        print(f"\n[质检样例] 随机 {len(picked)} 轮（原文 + 标签）:")
+        print(f"\n[qc samples] random {len(picked)} turns (source text + tags):")
         for ci, key_s, ti, sid, dia, text in picked:
             tags = results.get((ci, key_s, ti)) or []
             print(f"  [{dia}] {text[:110]}")

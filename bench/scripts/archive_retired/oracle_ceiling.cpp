@@ -192,7 +192,7 @@ std::string q_gold_key(const BenchQuestion& q) { return q.id; }
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::fprintf(stderr, "用法: oracle_ceiling <pools|e1|e2> <out.ndjson>\n");
+    std::fprintf(stderr, "Usage: oracle_ceiling <pools|e1|e2> <out.ndjson>\n");
     return 1;
   }
   std::string mode = argv[1];
@@ -218,14 +218,14 @@ int main(int argc, char** argv) {
     client = DeepSeekClient::from_config("bench/config/deepseek.local.json",
                                          "deepseek-v4-flash", "bench/cache");
     if (!client) {
-      std::fprintf(stderr, "未找到 API key\n");
+      std::fprintf(stderr, "API key not found\n");
       return 1;
     }
   }
 
   FILE* out = std::fopen(out_path.c_str(), "w");
   if (!out) {
-    std::fprintf(stderr, "打不开 %s\n", out_path.c_str());
+    std::fprintf(stderr, "Cannot open %s\n", out_path.c_str());
     return 1;
   }
 
@@ -270,7 +270,7 @@ int main(int argc, char** argv) {
       for (auto& g : q.evidence_dia_ids)
         if (sel_dias.count(g)) hit.push(Json::string(g));
       rec["gold_picked"] = std::move(hit);
-      std::fprintf(stderr, "[e1] %s: 池=%zu LLM选=%zu 金标入选=%zu\n", q.id.c_str(),
+      std::fprintf(stderr, "[e1] %s: pool=%zu LLM selected=%zu gold selected=%zu\n", q.id.c_str(),
                    pool.size(), sel.size(), rec["gold_picked"].arr.size());
     } else if (mode == "e2") {
       auto orig = build_pool(e, q, cfg);
@@ -340,7 +340,7 @@ int main(int argc, char** argv) {
       rec["gold_new_in_union"] = std::move(newg);
       rec["new_non_gold_count"] = Json::number((double)new_non_gold);
       rec["union_pool_size"] = Json::number((double)union_dias.size());
-      std::fprintf(stderr, "[e2] %s: 原池金标=%zu/扩展命中=%d 查询数=%zu 新噪声=%d\n",
+      std::fprintf(stderr, "[e2] %s: original pool gold=%zu/expansion hits=%d queries=%zu new noise=%d\n",
                    q.id.c_str(), orig_gold.size(), gold_hit_qs, queries.size(), new_non_gold);
     }
     std::string line = rec.dump();

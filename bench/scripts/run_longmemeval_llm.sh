@@ -8,7 +8,7 @@ if [ ! -f "$DATA" ]; then
   DATA="bench/data/longmemeval_s.json"
 fi
 if [ ! -f "$DATA" ]; then
-  echo "数据文件不存在: bench/data/longmemeval_s_cleaned.json 或 longmemeval_s.json" >&2
+  echo "Data file not found: bench/data/longmemeval_s_cleaned.json or longmemeval_s.json" >&2
   exit 1
 fi
 mkdir -p bench/runs bench/cache

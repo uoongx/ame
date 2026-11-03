@@ -78,10 +78,10 @@ json.dump({"version": "cilin-funNLP", "entries": entries},
 strong_pairs = sum(len(e["syn_strong"]) for e in entries)
 near_pairs = sum(len(e["syn_near"]) for e in entries)
 ant_pairs = sum(len(e["antonyms"]) for e in entries)
-print(f"同义组={n_strong_groups} 近义组={n_near_groups} 跳过={n_skip} 反义对={n_ant}")
+print(f"synonym_groups={n_strong_groups} near_synonym_groups={n_near_groups} skipped={n_skip} antonym_pairs={n_ant}")
 print(f"entries={len(entries)} strong={strong_pairs} near={near_pairs} ant={ant_pairs}")
 # 抽样验证：睡不着组
 for e in entries:
     if e["word"] == "失眠":
-        print("失眠:", e)
+        print("Insomnia entry:", e)
         break

@@ -79,7 +79,7 @@ def main():
         for variant, data in (("raw", RAW), ("enr", ENRICHED)):
             name = f"{tier}_{variant}"
             if not data.exists():
-                print(f"[skip] {name}: 数据缺失 {data}")
+                print(f"[skip] {name}: missing data {data}")
                 continue
             rc, el, rows = run_one(name, data, extra)
             res[name] = rows
@@ -114,7 +114,7 @@ def main():
     table = "\n".join(lines)
     (OUT / "ab_table.md").write_text(table, encoding="utf-8")
     print("\n" + table)
-    print(f"\n[done] 落盘 {OUT/'ab_table.md'}")
+    print(f"\n[done] Wrote {OUT/'ab_table.md'}")
 
 
 if __name__ == "__main__":

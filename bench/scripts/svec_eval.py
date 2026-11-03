@@ -137,7 +137,7 @@ class Embedder:
         cand = [model_dir / "onnx" / "model_quantized.onnx", model_dir / "onnx" / "model.onnx"]
         path = next((p for p in cand if p.exists()), None)
         if path is None:
-            raise SystemExit(f"模型不可得: {model_dir} 下无 onnx/model_quantized.onnx 或 model.onnx")
+            raise SystemExit(f"Model unavailable: no onnx/model_quantized.onnx or model.onnx under {model_dir}")
         self.path = path
         self.tok = MiniBertTokenizer(model_dir / "tokenizer.json")
         opts = ort.SessionOptions()
@@ -394,17 +394,17 @@ def main():
         vecs[("q", r["question_id"])] = cache.get("q", QUERY_INSTRUCTION + r["question"])
 
     n_texts = len(texts_p) + len(pools)
-    print(f"[embed] 模型 {emb.path.name}  缓存命中 {cache.hits} / 新算 {cache.misses}")
-    print(f"[embed] 证据 {len(texts_p)} 条（去重）+ 问题 {len(pools)} 题；"
-          f"证据批量均速 {len(texts_p) / max(t_pass, 1e-9):.0f} 条/s"
-          f"（{t_pass:.1f}s），问题单条均延迟 {t_query / len(pools) * 1000:.1f} ms/题"
-          f"（含缓存命中题则更低；每查询端侧成本 = 1 次问题 embed + 60 次点积）")
+    print(f"[embed] model {emb.path.name}, cache hits {cache.hits} / computed {cache.misses}")
+    print(f"[embed] passages {len(texts_p)} (deduplicated) + queries {len(pools)}; "
+          f"mean passage batch throughput {len(texts_p) / max(t_pass, 1e-9):.0f} passages/s"
+          f" ({t_pass:.1f}s), mean per-query latency {t_query / len(pools) * 1000:.1f} ms/query"
+          f" (lower when cache-hit queries are included; per-query device cost = 1 query embedding + 60 dot products)")
 
     # ---------- 2. 训练对 + 同折 5-fold 对照 ----------
     pairs, stats = build_pairs_svec(pools, labels, vecs)
     n_pos = sum(y for _, y, _ in pairs)
-    print(f"[train] 训练对 {len(pairs)}（正例 {n_pos} = {n_pos / len(pairs):.1%}）"
-          f" 题数 {len(set(q for _, _, q in pairs))} 标注: {stats}")
+    print(f"[train] training pairs {len(pairs)} (positive {n_pos} = {n_pos / len(pairs):.1%})"
+          f" questions {len(set(q for _, _, q in pairs))} labels: {stats}")
 
     qids_l = sorted(set(q for _, _, q in pairs))
     random.Random(42).shuffle(qids_l)
@@ -422,7 +422,7 @@ def main():
     for tag in ("base", "svec"):
         print(f"[cv:{tag}] AUC = {sum(res[tag]['auc']) / 5:.3f} "
               f"[{', '.join(f'{v:.3f}' for v in res[tag]['auc'])}]  "
-              f"top10召回 = {sum(res[tag]['rec']) / 5:.3f} "
+              f"top10 recall = {sum(res[tag]['rec']) / 5:.3f} "
               f"[{', '.join(f'{v:.3f}' for v in res[tag]['rec'])}]")
 
     # 全量训练 svec 模型 → 持久化
@@ -438,7 +438,7 @@ def main():
     with open(model_path, "w", encoding="utf-8") as f:
         json.dump(svec_model, f, ensure_ascii=False, indent=1)
     print(f"[model] {model_path}")
-    print(f"[model] 权重:", {k: round(v, 3) for k, v in zip(svec_model["features"], w)},
+    print(f"[model] weights:", {k: round(v, 3) for k, v in zip(svec_model["features"], w)},
           "bias:", round(b, 3))
 
     # ---------- 3. 端到端复刻重放 ----------
@@ -462,8 +462,8 @@ def main():
                 covs.append(c)
                 ah += bool(c > 0)
         rows[tag] = per_q
-        print(f"[replay:{tag}] 覆盖率 = {sum(covs) / len(covs):.3f}  any-hit {ah}/{len(covs)}"
-              f"（n={len(covs)} 题，零 LLM 复刻口径，标准池无实体通道并入）")
+        print(f"[replay:{tag}] coverage = {sum(covs) / len(covs):.3f}  any-hit {ah}/{len(covs)}"
+              f" (n={len(covs)} questions, zero-LLM replay definition, standard pool without entity-channel merging)")
 
     rescued, lost = [], []
     for qid in rows["base"]:
@@ -474,8 +474,8 @@ def main():
             rescued.append((qid, cb, cs_))
         elif cs_ < cb:
             lost.append((qid, cb, cs_))
-    print(f"[replay:Δ svec-base] 救回 {len(rescued)} {[q for q, _, _ in rescued]}  "
-          f"丢失 {len(lost)} {[q for q, _, _ in lost]}")
+    print(f"[replay:Δ svec-base] rescued {len(rescued)} {[q for q, _, _ in rescued]}  "
+          f"lost {len(lost)} {[q for q, _, _ in lost]}")
     for qid, cb, cs_ in rescued + lost:
         print(f"    {qid}: {cb:.3f} -> {cs_:.3f}")
 
@@ -485,7 +485,8 @@ def main():
 
     # ---------- 4. Kendall tau：svec vs LLM 全池教师（B 类 6 题） ----------
     import re
-    rx = re.compile(r"\[llm-rerank\]\s+(\S+?):\s+LLM 置顶 .*?\| 选中: (.*?) \| 候选: (.*)$")
+    rx = re.compile(r"\[llm-rerank\]\s+(\S+?):\s+LLM (?:置顶|promoted) .*?\| "
+                    r"(?:选中|selected): (.*?) \| (?:候选|candidates): (.*)$")
     llm_sel = {}
     for lp in a.log:
         for line in open(lp, encoding="utf-8", errors="replace"):
@@ -520,13 +521,13 @@ def main():
             gold_rank = (next((i + 1 for i, d in enumerate(svec_order) if d == g0), None),
                          next((i + 1 for i, d in enumerate(sel) if d == g0), None))
         tau_rows.append((qid, tau_a, tau_b_full, tau_bm, tau_fu, gold_rank))
-    print("[tau:B类6题] qid | τ(svec,LLM选中集) | τ(svec,LLM全池) | "
-          "τ(bm25,LLM全池) | τ(fusion,LLM全池) | 金标svec秩/LLM秩")
+    print("[tau:6 class-B questions] qid | τ(svec,LLM-selected) | τ(svec,LLM-full-pool) | "
+          "τ(bm25,LLM-full-pool) | τ(fusion,LLM-full-pool) | gold svec-rank/LLM-rank")
     for qid, ta, tb_, tbm, tfu, gr in tau_rows:
         f = lambda v: "  n/a" if v != v else f"{v:+.3f}"  # noqa: E731
         print(f"    {qid}: {f(ta)} {f(tb_)} {f(tbm)} {f(tfu)}  {gr}")
     vals = [row[2] for row in tau_rows if row[2] == row[2]]
-    print(f"[tau] svec vs LLM 全池 平均 tau = {sum(vals) / len(vals):+.3f}（n={len(vals)}）")
+    print(f"[tau] svec vs full LLM pool, mean tau = {sum(vals) / len(vals):+.3f} (n={len(vals)})")
 
     # ---------- 5. 端侧集成账素材 ----------
     def du(path):
@@ -535,7 +536,7 @@ def main():
     print(f"[size] int8 onnx {du(md / 'onnx/model_quantized.onnx'):.1f} MB  "
           f"fp32 onnx {du(md / 'onnx/model.onnx'):.1f} MB  "
           f"tokenizer.json {du(md / 'tokenizer.json'):.2f} MB  "
-          f"(zh 参照: {du(ROOT / 'bench/models/bge-small-zh-v1.5/onnx/model_quantized.onnx'):.1f} MB int8)")
+          f"(zh reference: {du(ROOT / 'bench/models/bge-small-zh-v1.5/onnx/model_quantized.onnx'):.1f} MB int8)")
 
 
 if __name__ == "__main__":

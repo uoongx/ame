@@ -22,7 +22,7 @@ def call(extra, mt=512):
         print(f"  OK {time.time()-t0:.1f}s finish={ch['finish_reason']} "
               f"content={msg_content(ch)!r} completion={resp['usage']['completion_tokens']}")
     except urllib.error.HTTPError as e:
-        print("  HTTP", e.code, e.read().decode()[:200])
+        print("  HTTP", e.code, "response_chars", len(e.read().decode()))
 
 def msg_content(ch):
     m = ch["message"]
@@ -34,6 +34,6 @@ print("B) chat_template_kwargs thinking=false:")
 call({"chat_template_kwargs": {"thinking": False}})
 print("C) enable_thinking=false:")
 call({"enable_thinking": False})
-print("D) max_tokens=16384 (不带其他参数):")
+print("D) max_tokens=16384 (without other parameters):")
 call({}, 16384)
 PYEOF

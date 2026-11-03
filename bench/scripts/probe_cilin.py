@@ -21,4 +21,4 @@ for repo in REPOS:
         hits = [n for n in names if any(k in n.lower() for k in ("cilin", "词林", "synonym", "hownet", "同义"))]
         print(repo, "@", ver, "files:", len(names), "hits:", hits[:8])
     except Exception as e:
-        print(repo, "ERR", str(e)[:80])
+        print(repo, "ERR", type(e).__name__)

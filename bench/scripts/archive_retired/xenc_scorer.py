@@ -131,7 +131,7 @@ def main():
     if not path.exists():
         path = mdir / "onnx/model.onnx"
     if not path.exists():
-        raise SystemExit(f"模型不可得: {mdir}")
+        raise SystemExit(f"Model unavailable: {mdir}")
     sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
     tok = load_tokenizer(mdir)
     cache = PairCache(mdir.name)

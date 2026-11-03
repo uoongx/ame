@@ -143,7 +143,7 @@ def run_bench(post_p3):
     with open(log, "w", encoding="utf-8") as lf:
         rc = subprocess.run(cmd, cwd=ROOT, stdout=lf, stderr=lf, env=env).returncode
     if rc != 0:
-        sys.exit(f"bench 运行失败 rc={rc}，见 {log}")
+        sys.exit(f"bench failed with rc={rc}; see {log}")
     return time.time() - t0, dump, cands
 
 
@@ -205,7 +205,7 @@ def main():
                     help="P3b 落地后的观测口径（只落 runs/ 明细，不写 docs 报告）")
     args = ap.parse_args()
     if not EXE.exists():
-        sys.exit(f"缺少 {EXE}，先 cmake --build build-win")
+        sys.exit(f"Missing {EXE}; run cmake --build build-win first")
     elapsed, dump, cands = run_bench(args.post_p3)
     rows = load_ndjson(dump)
     cand_rows = load_ndjson(cands)
@@ -219,7 +219,7 @@ def main():
                    ensure_ascii=False, indent=1),
         encoding="utf-8")
     if args.post_p3:
-        print(f"[done] post-P3 观测明细 {OUT.relative_to(ROOT)}/miss_taxonomy_{tag}.json")
+        print(f"[done] post-P3 observation details: {OUT.relative_to(ROOT)}/miss_taxonomy_{tag}.json")
         return
     write_report(items, elapsed, tag)
 
@@ -288,7 +288,7 @@ def write_report(items, elapsed, tag):
 
     REPORT.write_text("\n".join(lines), encoding="utf-8")
     print("\n".join(lines))
-    print(f"\n[done] 报告 {REPORT.relative_to(ROOT)}")
+    print(f"\n[done] Report: {REPORT.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

@@ -21,17 +21,17 @@ int main() {
   double t2 = now();
   apply_lexicon(e, std::string(base) + "lexicon_hf.json", &a3);
   double t3 = now();
-  printf("zh:   %8d 条 %5.1fs\n", a1, t1 - t0);
-  printf("zh2:  %8d 条 %5.1fs\n", a2, t2 - t1);
-  printf("hf:   %8d 条 %5.1fs\n", a3, t3 - t2);
+  printf("zh:   %8d entries %5.1fs\n", a1, t1 - t0);
+  printf("zh2:  %8d entries %5.1fs\n", a2, t2 - t1);
+  printf("hf:   %8d entries %5.1fs\n", a3, t3 - t2);
   size_t edges = e.storage().edge_count();
   double t4 = now();
   apply_lexicon(e, std::string(base) + "lexicon_hf.json", nullptr);
   double t5 = now();
-  printf("hf 二次灌库: %.1fs 边数 %zu -> %zu（幂等=%s）\n", t5 - t4, edges,
-         e.storage().edge_count(), edges == e.storage().edge_count() ? "是" : "否");
-  printf("normalize(睡不着)=%s（应为 失眠）\n", e.keywords().normalize("睡不着").c_str());
-  printf("normalize(制发)=%s normalize(失眠)=%s\n", e.keywords().normalize("制发").c_str(),
+  printf("hf second import: %.1fs edges %zu -> %zu (idempotent=%s)\n", t5 - t4, edges,
+         e.storage().edge_count(), edges == e.storage().edge_count() ? "yes" : "no");
+  printf("normalize(unable to sleep)=%s (expected insomnia)\n", e.keywords().normalize("睡不着").c_str());
+  printf("normalize(hair processing)=%s normalize(insomnia)=%s\n", e.keywords().normalize("制发").c_str(),
          e.keywords().normalize("失眠").c_str());
   return 0;
 }

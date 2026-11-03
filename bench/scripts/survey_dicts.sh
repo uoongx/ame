@@ -20,7 +20,7 @@ FILES=(
   input/30wChinsesSeqDic_clean.txt
 )
 for f in "${FILES[@]}"; do
-  if [ ! -f "$f" ]; then echo "== $f [缺失]"; continue; fi
+  if [ ! -f "$f" ]; then echo "== $f [missing]"; continue; fi
   echo "== $f ($(stat -c%s "$f") bytes)"
   head -c 400 "$f" | od -c | head -2
   head -3 "$f" | cat -v

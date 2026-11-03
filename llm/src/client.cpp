@@ -96,7 +96,7 @@ std::string DeepSeekClient::build_body(const std::vector<ChatMessage>& messages,
 //   步骤2：200 → 解析 content 与 finish_reason；
 //          若 finish_reason==length（输出被截断，含思考烧光预算情形）且 max_tokens
 //          未到上限 32768，则翻倍 max_tokens 立即重试（记日志：finish_reason、
-//          completion_tokens、内容前缀，不打印 key）；
+//          completion_tokens、内容字节数，不打印 key）；
 //   步骤3：429/5xx/传输失败 → 指数退避（1/2/4/8/16 秒）重试，最多 5 次；
 //   步骤4：其余 4xx 立即失败（请求本身有问题，重试无意义）。
 std::string DeepSeekClient::call_api(const std::vector<ChatMessage>& messages,
@@ -113,7 +113,7 @@ std::string DeepSeekClient::call_api(const std::vector<ChatMessage>& messages,
       Json j = Json::parse(out, &ok);
       const Json* choices = ok ? j.find("choices") : nullptr;
       if (!choices || choices->arr.empty()) {
-        AME_LOGW("llm: 200 但响应解析失败，body[:200]=", out.substr(0, 200));
+        AME_LOGW("llm: HTTP 200 response parse failed, body_bytes=", out.size());
         return "";
       }
       const Json* ch = &choices->arr[0];
@@ -130,19 +130,19 @@ std::string DeepSeekClient::call_api(const std::vector<ChatMessage>& messages,
       }
       if (finish == "length" && opts.max_tokens < 32768) {
         opts.max_tokens *= 2;  // 截断自动加大预算重试
-        AME_LOGW("llm: finish_reason=length completion=", comp, " content[:200]=",
-                 c.substr(0, 200), "，max_tokens 翻倍重试");
+        AME_LOGW("llm: finish_reason=length completion=", comp, " content_bytes=",
+                 c.size(), ", retrying with doubled max_tokens");
         continue;
       }
       if (c.empty())
-        AME_LOGW("llm: 200 但 content 为空，finish_reason=", finish, " completion=", comp);
+        AME_LOGW("llm: HTTP 200 with empty content, finish_reason=", finish, " completion=", comp);
       return c;
     }
     if (code == 429 || code >= 500 || code == 0) {
-      AME_LOGW("llm: http ", code, "，第 ", attempt + 1, " 次重试");
+      AME_LOGW("llm: http ", code, ", retry attempt ", attempt + 1);
       continue;
     }
-    AME_LOGE("llm: http ", code, " 不可重试错误，body[:200]=", out.substr(0, 200));
+    AME_LOGE("llm: http ", code, " non-retryable error, body_bytes=", out.size());
     return "";
   }
   return "";

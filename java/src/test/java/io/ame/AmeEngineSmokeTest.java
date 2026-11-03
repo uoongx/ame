@@ -43,7 +43,7 @@ public final class AmeEngineSmokeTest {
       checkJson(reopened.stats(), '{');
     }
     verifyFailureLifecycle(base.resolve("failure-checks-" + UUID.randomUUID()));
-    LOG.info("AME Java/native smoke passed; snapshot directory: " + directory.toAbsolutePath());
+    LOG.info("AME Java/native smoke passed; Unicode snapshot round trip verified");
   }
 
   private static void verifyFailureLifecycle(Path root) throws Exception {

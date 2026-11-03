@@ -23,7 +23,8 @@ cache = PairCache("bge-reranker-base")
 HAS_TTI = "token_type_ids" in [i.name for i in sess.get_inputs()]
 
 labels = {}
-rx = re.compile(r"\[llm-rerank\]\s+(\S+?):\s+LLM 置顶 .*?\| 选中: (.*?) \| 候选: (.*)$")
+rx = re.compile(r"\[llm-rerank\]\s+(\S+?):\s+LLM (?:置顶|promoted) .*?\| "
+                r"(?:选中|selected): (.*?) \| (?:候选|candidates): (.*)$")
 for line in open(ROOT / "bench/runs/mechanisms/m12_cal.log", encoding="utf-8", errors="replace"):
     m = rx.search(line)
     if m and m.group(1) not in labels:
@@ -77,9 +78,9 @@ for r in pools:
         gold_ranks.append((qid, rank))
 
 vals = [t for t in taus if t == t]
-print(f"[tau] xenc vs 教师选中集 {len(vals)} 题 平均 {sum(vals)/len(vals):+.3f}"
-      f"（svec 同口径参照 +0.216）")
-print(f"[gold-rank] 金标在 xenc 序中的位次（前 15）："
+print(f"[tau] xenc vs teacher-selected set: {len(vals)} questions, mean {sum(vals)/len(vals):+.3f}"
+      f" (svec reference under the same definition: +0.216)")
+print(f"[gold-rank] gold-label ranks in xenc ordering (first 15): "
       f"{[f'{q}:{g}' for q, g in gold_ranks[:15]]}")
 with open(ROOT / "bench/runs/wmd/xenc_tau.json", "w", encoding="utf-8") as f:
     json.dump({"tau_mean": sum(vals) / len(vals), "n": len(vals),

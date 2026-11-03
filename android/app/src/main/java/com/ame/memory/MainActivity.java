@@ -129,7 +129,7 @@ public class MainActivity extends AppCompatActivity {
                 if (seg.endsWith(".pdf")) seg = seg.substring(0, seg.length() - 4);
                 if (seg.trim().isEmpty()) seg = "导览方案";   // ifBlank
                 final String name = seg;
-                Log.i(MemoryOrchestrator.TAG, "导入导览方案: " + name + " (" + uri + ")");
+                Log.i(MemoryOrchestrator.TAG, "Importing guide PDF: title_chars=" + name.length());
                 Session s = store.createSession(name, "guide", "guide.pdf");
                 File dir = store.sessionDir(s.id);
                 try (InputStream input = getContentResolver().openInputStream(uri)) {
@@ -137,8 +137,8 @@ public class MainActivity extends AppCompatActivity {
                     Files.write(new File(dir, "guide.pdf").toPath(), readAllBytes(input));
                 }
                 GuidePdf.Plan plan = GuidePdf.parse(this, new File(dir, "guide.pdf"), dir);
-                Log.i(MemoryOrchestrator.TAG, "PDF 解析完成: 文本" + plan.text.length()
-                        + "字 图片" + plan.images.size() + "张");
+                Log.i(MemoryOrchestrator.TAG, "PDF parsed: text_chars=" + plan.text.length()
+                        + " images=" + plan.images.size());
                 // use{} → try-with-resources（graph 后端快照兜底落盘由 JNI close 负责）
                                 try (AmeEngine eng = AmeEngine.create(dir.getAbsolutePath())) {
                     KeywordDict.ensureLoaded(this, eng);  // 分块提取依赖词典
@@ -154,7 +154,7 @@ public class MainActivity extends AppCompatActivity {
                         eng.rememberTurn("guide", chunks.get(i), base + i, "g" + i, s.id);
                     }
                     eng.save();
-                    Log.i(MemoryOrchestrator.TAG, "方案灌入记忆图: " + chunks.size() + "块");
+                    Log.i(MemoryOrchestrator.TAG, "Guide plan ingested into memory: chunks=" + chunks.size());
                 }
                 runOnUiThread(() -> {
                     Toast.makeText(MainActivity.this,

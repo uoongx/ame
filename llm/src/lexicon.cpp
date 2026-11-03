@@ -486,10 +486,10 @@ int build_lexicon_json(ILlmClient& client, const std::vector<std::string>& vocab
     const auto requests = build_words_chunk(words, begin, end, batch);
     added += merge_generated_entries(chat_with_retry(client, requests, concurrency), output, failed_batches);
     if (!write_lexicon(out_path, top_n, output)) return -1;
-    AME_LOGI("lexicon: 进度 ", end, "/", words.size(), " 词，失败批 ", failed_batches);
+    AME_LOGI("lexicon: progress ", end, "/", words.size(), " words, failed batches ", failed_batches);
   }
   if (words.empty() && !write_lexicon(out_path, top_n, output)) return -1;
-  AME_LOGI("lexicon: 本次新增 ", added, " 条，总词条 ", output.positions.size());
+  AME_LOGI("lexicon: added ", added, " entries, total ", output.positions.size());
   return added;
 }
 
@@ -513,7 +513,7 @@ int validate_lexicon_json(ILlmClient& client, const std::string& in_path,
       failed_batches += merge_validation_batch(responses[i], work, chunk.spans[i], kept);
     commit_validated_words(*entries, work, end, kept, output);
     if (!write_validation_checkpoint(out_path, output)) return -1;
-    AME_LOGI("validate: 进度 ", end, "/", work.pairs.size(), " pair，失败批 ", failed_batches);
+    AME_LOGI("validate: progress ", end, "/", work.pairs.size(), " pairs, failed batches ", failed_batches);
   }
   carry_forward_entries(*entries, output);
   if (!write_validation_checkpoint(out_path, output)) return -1;
@@ -540,7 +540,7 @@ int score_word_sims(ILlmClient& client, const std::string& in_path,
       failed_batches += merge_score_batch(responses[i], work, chunk.spans[i], scores);
     commit_scored_words(work, end, scores, output);
     if (!write_score_checkpoint(out_path, output)) return -1;
-    AME_LOGI("score-sims: 进度 ", end, "/", work.pairs.size(), " pair，失败批 ", failed_batches);
+    AME_LOGI("score-sims: progress ", end, "/", work.pairs.size(), " pairs, failed batches ", failed_batches);
   }
   return static_cast<int>(work.pairs.size());
 }

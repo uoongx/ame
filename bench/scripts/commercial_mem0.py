@@ -76,7 +76,7 @@ def main():
     t0 = time.perf_counter()
     fails = 0
     if a0.search_only:
-        print("[mem0] --search-only：跳过写入")
+        print("[mem0] --search-only: skipping writes")
     for i, (dia, speaker, text) in enumerate(turns):
         if a0.search_only:
             break
@@ -85,11 +85,11 @@ def main():
                   metadata={"dia_id": dia})
         except Exception as e:
             fails += 1
-            print(f"[mem0] add fail {dia}: {e}", file=sys.stderr)
+            print(f"[mem0] add fail {dia}: {type(e).__name__}", file=sys.stderr)
         if (i + 1) % 50 == 0:
             print(f"[mem0] add {i + 1}/{len(turns)} ({time.perf_counter() - t0:.0f}s)", flush=True)
     write_s = time.perf_counter() - t0
-    print(f"[mem0] 写入完成 {len(turns) - fails}/{len(turns)} 条，{write_s:.0f}s，失败 {fails}")
+    print(f"[mem0] Writes completed: {len(turns) - fails}/{len(turns)}, {write_s:.0f}s, failures {fails}")
 
     per_q = []
     lat = []
@@ -102,7 +102,7 @@ def main():
         if isinstance(res, dict):
             res = res.get("results") or res.get("memories") or []
         if not dbg:
-            print(f"[mem0] search 返回结构样例: {json.dumps(res, ensure_ascii=False, default=str)[:300]}")
+            print(f"[mem0] search response structure sample: {json.dumps(res, ensure_ascii=False, default=str)[:300]}")
             dbg = True
         dias_loose, dias_strict = set(), set()
         for item in res:

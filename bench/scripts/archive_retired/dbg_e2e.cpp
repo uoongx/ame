@@ -20,9 +20,9 @@ int main() {
            se.context_score, se.event->text.c_str());
   // 失眠关键词状态
   const Node* ins = e.keywords().find("失眠");
-  printf("失眠 keyword: %s status=%d\n", ins ? "found" : "MISSING", ins ? ins->status : -1);
+  printf("Insomnia keyword: %s status=%d\n", ins ? "found" : "MISSING", ins ? ins->status : -1);
   const Node* press = e.keywords().find("压力");
-  printf("压力 keyword: %s status=%d\n", press ? "found" : "MISSING", press ? press->status : -1);
+  printf("Stress keyword: %s status=%d\n", press ? "found" : "MISSING", press ? press->status : -1);
   // 直接看扩散结果
   SeedGenerator sg(e.storage(), e.vectors(), e.keywords(), &e.extractor());
   auto seeds = sg.gen_seeds(sq);
@@ -43,7 +43,7 @@ int main() {
            n ? (n->name.empty() ? n->text : n->name).c_str() : "");
   }
   // 失眠节点的邻边明细
-  printf("失眠 neighbors:\n");
+  printf("Insomnia neighbors:\n");
   for (auto& [ed, n] : e.storage().neighbors(ins->uid))
     printf("  %s -> %s %s w=%.2f\n", rel_name(ed.type), kind_name(n->kind),
            (n->name.empty() ? n->text : n->name).substr(0, 20).c_str(), ed.weight);

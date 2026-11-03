@@ -10,17 +10,17 @@ int main() {
   auto r3 = e.remember("老王昨天很悲伤");
   int applied = 0;
   apply_lexicon(e, "/mnt/d/agent/memory/ame/bench/data/lexicon_zh.json", &applied);
-  printf("applied=%d normalize(睡不着)=%s normalize(失眠)=%s\n", applied,
+  printf("applied=%d normalize(unable to sleep)=%s normalize(insomnia)=%s\n", applied,
          e.keywords().normalize("睡不着").c_str(), e.keywords().normalize("失眠").c_str());
   const Node* ins = e.keywords().find("失眠");
-  printf("失眠 node: %s status=%d\n", ins ? "yes" : "no", ins ? ins->status : -1);
-  printf("normalize(开心)=%s variants(开心):", e.keywords().normalize("开心").c_str());
+  printf("Insomnia node: %s status=%d\n", ins ? "yes" : "no", ins ? ins->status : -1);
+  printf("normalize(happy)=%s variants(happy):", e.keywords().normalize("开心").c_str());
   for (auto& v : e.keywords().variants("开心", 8)) printf(" %s", v.c_str());
   printf("\n");
   SeedQuery sq2;
   sq2.text = "开心";
   auto rr2 = e.recall(sq2, {}, 2, 10, true);
-  printf("开心: code=%d n=%zu\n", (int)rr2.code, rr2.events.size());
+  printf("Happy query: code=%d n=%zu\n", (int)rr2.code, rr2.events.size());
   for (auto& se : rr2.events)
     printf("  %.3f %s %.25s\n", se.score, se.event->uid.c_str(), se.event->text.c_str());
   SeedQuery sq;

@@ -191,15 +191,15 @@ def main():
     qs = load_questions(ROOT / a.dump)
     gold = [q["gold"] for q in qs]
     n = len(qs)
-    print(f"[corpus] conv-26 轮次 {len(turns)}；题目 {n}（有金标）")
-    assert n == 48, f"题目数 {n} != 48（dump 口径漂移？）"
+    print(f"[corpus] conv-26 turns {len(turns)}; questions {n} (with gold labels)")
+    assert n == 48, f"Question count {n} != 48 (dump scope changed?)"
 
     results = {}
 
     if a.arm in ("all", "dense-turn", "dense-window", "dense-large"):
         model_dir = a.large_dir if a.arm == "dense-large" else a.model_dir
         if not (ROOT / model_dir / "onnx" / "model_quantized.onnx").exists():
-            print(f"[skip] {model_dir} 模型不可得，臂 {a.arm} 跳过")
+            print(f"[skip] Model unavailable at {model_dir}; skipping arm {a.arm}")
         else:
             emb = se.Embedder(str(ROOT / model_dir))
             # 缓存键防碰撞：small/large 的 onnx 文件名同为 model_quantized，
@@ -214,7 +214,7 @@ def main():
                 ret = [{turns[i][0] for i in row} for row in top]
                 cov, ah = evaluate(gold, ret, n)
                 results[tag] = {"coverage": round(cov, 3), "any_hit": f"{ah}/{n}"}
-                print(f"[{tag}] 覆盖率={cov:.3f} any-hit={ah}/{n}（模型 {Path(model_dir).name}）")
+                print(f"[{tag}] coverage={cov:.3f} any-hit={ah}/{n} (model {Path(model_dir).name})")
             if a.arm in ("all", "dense-window"):
                 tok = emb.tok
                 win_texts, win_dias, win_spans, turn_spans, turn_dias = build_windows(turns, tok)
@@ -242,8 +242,8 @@ def main():
                     "coverage_strict": round(cov_s, 3), "any_hit_strict": f"{ah_s}/{n}",
                     "coverage_overlap": round(cov_o, 3), "any_hit_overlap": f"{ah_o}/{n}",
                     "n_windows": len(win_texts)}
-                print(f"[dense-window] 窗数={len(win_texts)} 严格口径 覆盖率={cov_s:.3f} "
-                      f"any-hit={ah_s}/{n}；交叠口径 覆盖率={cov_o:.3f} any-hit={ah_o}/{n}")
+                print(f"[dense-window] windows={len(win_texts)} strict definition coverage={cov_s:.3f} "
+                      f"any-hit={ah_s}/{n}; overlap definition coverage={cov_o:.3f} any-hit={ah_o}/{n}")
 
     if a.arm in ("all", "bm25-turn"):
         docs = [tokenize(t[2]) for t in turns]
@@ -254,7 +254,7 @@ def main():
             ret.append({turns[i][0] for i in idx})
         cov, ah = evaluate(gold, ret, n)
         results["bm25-turn"] = {"coverage": round(cov, 3), "any_hit": f"{ah}/{n}"}
-        print(f"[bm25-turn] 覆盖率={cov:.3f} any-hit={ah}/{n}（手写 BM25 k1=1.2 b=0.75）")
+        print(f"[bm25-turn] coverage={cov:.3f} any-hit={ah}/{n} (custom BM25 k1=1.2 b=0.75)")
 
     out = ROOT / "bench" / "runs" / "svec_eng" / "ref_rag_results.json"
     prev = json.load(open(out, encoding="utf-8")) if out.exists() else {}

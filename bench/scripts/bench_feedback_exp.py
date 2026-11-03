@@ -70,7 +70,7 @@ def main():
     ap.add_argument("--no-llm", action="store_true", help="不判分（反馈为零，仅供冒烟）")
     args = ap.parse_args()
     if not EXE.exists():
-        sys.exit(f"缺少 {EXE}，先 cmake --build build-win")
+        sys.exit(f"Missing {EXE}; run cmake --build build-win first")
     use_llm = not args.no_llm
 
     OUT.mkdir(parents=True, exist_ok=True)
@@ -84,7 +84,7 @@ def main():
     for name, dataset, data, qids in configs:
         r = run_one(name, dataset, data, qids, use_llm, OUT)
         if r is None:
-            print(f"[skip] {name}: 数据缺失 {data}")
+            print(f"[skip] {name}: missing data {data}")
             continue
         elapsed, dump, log, rc = r
         rows, summary = [], None
@@ -120,14 +120,14 @@ def main():
             print(f"[run] {name}: rc={rc} {elapsed:.1f}s up={up} same={same} down={down} nogold={nogold}")
         else:
             lines.append("- 汇总: 未捕获 [fbexp-summary]（见 log）")
-            print(f"[run] {name}: rc={rc} {elapsed:.1f}s (无 fbexp 输出，见 {log})")
+            print(f"[run] {name}: rc={rc} {elapsed:.1f}s (no fbexp output; see {log})")
     lines.append(f"\n## 总计\n\n- questions={grand_q} up={tot['up']} same={tot['same']} "
                  f"down={tot['down']} nogold={tot['nogold']}")
     lines.append(f"- 端到端耗时: {(time.time() - t_start) / 60:.1f} min（时间盒 ≤60min）")
     report = "\n".join(lines)
     (OUT / "feedback_rank_report.md").write_text(report, encoding="utf-8")
     print("\n" + report)
-    print(f"\n[done] 报告落盘 {OUT/'feedback_rank_report.md'}")
+    print(f"\n[done] Report written to {OUT/'feedback_rank_report.md'}")
 
 
 if __name__ == "__main__":

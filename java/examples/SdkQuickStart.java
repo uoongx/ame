@@ -20,7 +20,7 @@ public final class SdkQuickStart {
     Path directory = args.length == 0
         ? Files.createTempDirectory("ame-quickstart-")
         : Path.of(args[0]).toAbsolutePath().normalize();
-    LOG.log(Level.INFO, "演示数据目录：{0}", directory);
+    LOG.log(Level.INFO, "Demo data directory: {0}", directory);
     String messagePrefix = UUID.randomUUID().toString();
     long now = Instant.now().getEpochSecond(); // SDK timestamps are epoch SECONDS.
 
@@ -28,24 +28,24 @@ public final class SdkQuickStart {
       String userWrite = memory.rememberTurn(
           "游客", "我喜欢安静的博物馆，尤其喜欢青铜器。😊", now,
           messagePrefix + ":user", "demo-session");
-      LOG.log(Level.INFO, "写入游客消息：{0}", userWrite);
+      LOG.log(Level.INFO, "Write result: role=user, jsonChars={0}", userWrite.length());
       String assistantWrite = memory.rememberTurn(
           "助手", "可以选择人少的时段，慢慢欣赏青铜器展览。", now,
           messagePrefix + ":assistant", "demo-session");
-      LOG.log(Level.INFO, "写入助手消息：{0}", assistantWrite);
+      LOG.log(Level.INFO, "Write result: role=assistant, jsonChars={0}", assistantWrite.length());
       String recalled = memory.recall("喜欢安静的博物馆和青铜器", 3);
-      LOG.log(Level.INFO, "召回 JSON：{0}", recalled);
+      LOG.log(Level.INFO, "Recall result: jsonChars={0}", recalled.length());
       String stats = memory.stats();
-      LOG.log(Level.INFO, "保存前统计：{0}", stats);
+      LOG.log(Level.INFO, "Stats before save: jsonChars={0}", stats.length());
       memory.save(); // Explicit checkpoint; close() also saves and releases the directory lock.
     }
 
-    // Reopen only after the previous instance has closed. JSON is logged intact, not parsed here.
+    // Reopen only after the previous instance has closed. Log JSON lengths, not message contents.
     try (AmeEngine reopened = AmeEngine.open(directory)) {
       String recalled = reopened.recall("喜欢安静的博物馆和青铜器", 3);
-      LOG.log(Level.INFO, "重开后召回 JSON：{0}", recalled);
+      LOG.log(Level.INFO, "Recall after reopen: jsonChars={0}", recalled.length());
       String stats = reopened.stats();
-      LOG.log(Level.INFO, "重开后统计：{0}", stats);
+      LOG.log(Level.INFO, "Stats after reopen: jsonChars={0}", stats.length());
     }
     // The directory is deliberately retained so the saved snapshot can be inspected.
   }

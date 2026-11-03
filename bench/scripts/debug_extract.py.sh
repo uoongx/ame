@@ -34,11 +34,11 @@ try:
     with urllib.request.urlopen(req, timeout=180) as r:
         resp = json.load(r)
 except urllib.error.HTTPError as e:
-    print("HTTP", e.code, e.read().decode()[:500]); raise SystemExit
+    print("HTTP", e.code, "response_chars", len(e.read().decode())); raise SystemExit
 dt = time.time() - t0
 ch = resp["choices"][0]
 msg = ch["message"]
-print(f"耗时 {dt:.1f}s finish_reason={ch.get('finish_reason')} "
+print(f"elapsed {dt:.1f}s finish_reason={ch.get('finish_reason')} "
       f"completion_tokens={resp['usage']['completion_tokens']}")
 print("content len:", len(msg.get("content") or ""))
 print("reasoning len:", len(msg.get("reasoning_content") or ""))

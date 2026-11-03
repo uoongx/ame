@@ -100,11 +100,11 @@ int main(int argc, char** argv) {
     for (auto& [ed, nb] : e.storage().neighbors(kn->uid, {RelType::REL_OPPOSITE}))
       opp_edges.insert(kn->name + "|" + nb->name);
   }
-  std::printf("== L1层 结构存量 ==\n");
-  std::printf("Keyword 节点: 灌库前 %zu -> 灌库后 %zu\n", kw_before, kw_after);
-  std::printf("别名表: 灌库前 %zu -> 灌库后 %zu（灌入 applied=%d）\n", alias_before,
+  std::printf("== L1 structure inventory ==\n");
+  std::printf("Keyword nodes: before import %zu -> after import %zu\n", kw_before, kw_after);
+  std::printf("Alias table: before import %zu -> after import %zu (applied=%d)\n", alias_before,
               alias_after, applied);
-  std::printf("REL_SIMILAR 边 %zu，REL_OPPOSITE 边 %zu\n", sim_edges.size(),
+  std::printf("REL_SIMILAR edges %zu, REL_OPPOSITE edges %zu\n", sim_edges.size(),
               opp_edges.size());
 
   // 可选：加载查询侧大词表（复现 L1 配置）
@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
   }
 
   // ---- 第2层：问题词激活率 ----
-  std::printf("\n== L2层 查询词激活率（lex 通道口径，baseline 无条件归一）==\n");
+  std::printf("\n== L2 query-term activation (lex channel; baseline always normalizes) ==\n");
   int n_q = 0, n_expand_q = 0, n_hardseed_q = 0;
   int tot_words = 0, tot_alias_hit = 0, tot_variants = 0, tot_variant_df = 0;
   std::vector<const BenchQuestion*> trace_qs;
@@ -165,8 +165,8 @@ int main(int argc, char** argv) {
     if (hard_kw > 0) ++n_hardseed_q;
     bool miss = q.evidence_dia_ids.empty() ? false : true;  // 占位（金标在 dump 侧判）
     (void)miss;
-    std::printf("题 %s | 内容词 %zu | 别名命中 %d | 有variants %d | 扩展df>0 %d | "
-                "关键词硬种子 %d | 例:",
+    std::printf("Question %s | content terms %zu | alias hits %d | with variants %d | expanded df>0 %d | "
+                "keyword hard seeds %d | examples:",
                 q.id.c_str(), qcontent.size(), alias_hit, with_var, var_df, hard_kw);
     for (auto& s : ex_vars) std::printf(" %s;", s.c_str());
     std::printf("\n");
@@ -176,14 +176,14 @@ int main(int argc, char** argv) {
         if (q.id == argv[i]) trace_qs.push_back(&q);
     }
   }
-  std::printf("汇总: %d 题 | 内容词 %d | 别名命中 %d | 有variants词 %d | 扩展df>0 %d | "
-              "有硬种子题 %d/%d | 有扩展题 %d/%d\n",
+  std::printf("Summary: %d questions | content terms %d | alias hits %d | terms with variants %d | expanded df>0 %d | "
+              "questions with hard seeds %d/%d | questions with expansions %d/%d\n",
               n_q, tot_words, tot_alias_hit, tot_variants, tot_variant_df, n_hardseed_q,
               n_q, n_expand_q, n_q);
 
   // ---- 第3层：逐站 trace ----
   for (auto* q : trace_qs) {
-    std::printf("\n== L3层 trace %s ==\n", q->id.c_str());
+    std::printf("\n== L3 trace %s ==\n", q->id.c_str());
     std::printf("Q: %s\n", q->question.c_str());
     auto toks = tokenize(q->question);
     std::unordered_set<std::string> qcontent;
@@ -206,9 +206,9 @@ int main(int argc, char** argv) {
     std::unordered_map<std::string, double> idf;
     for (auto& w : qcontent) { idf[w] = std::log(1.0 + events.size() / (1.0 + df[w])); idf_sum += idf[w]; }
     for (auto& [v, w] : expand_of) idf[v] = std::log(1.0 + events.size() / (1.0 + df[v]));
-    std::printf("[站a lex通道] 内容词:");
+    std::printf("[stage a lex channel] content terms:");
     for (auto& w : qcontent) std::printf(" %s(df=%d,idf=%.2f)", w.c_str(), df[w], idf[w]);
-    std::printf("\n  扩展词:");
+    std::printf("\n  expanded terms:");
     for (auto& [v, ws] : expand_of)
       std::printf(" %s<= %s(df=%d,idf=%.2f)", v.c_str(), ws.first.c_str(), df[v], idf[v]);
     // lex 种子会收录的事件（m>=2 或 单罕见词）
@@ -229,7 +229,7 @@ int main(int argc, char** argv) {
       (void)sv;
     }
     std::sort(lex_hits.begin(), lex_hits.end(), std::greater<>());
-    std::printf("\n  lex种子收录 %zu 条（其中仅靠扩展词命中 %zu 条）:",
+    std::printf("\n  lex seeds include %zu events (%zu matched only by expanded terms):",
                 lex_hits.size(), variant_only_uids.size());
     for (size_t i = 0; i < lex_hits.size() && i < 5; ++i)
       std::printf(" %s(w=%.2f)", lex_hits[i].second.c_str(), lex_hits[i].first);
@@ -242,7 +242,7 @@ int main(int argc, char** argv) {
     sq.soft_topk = 8;
     sq.lex_topk = 30;
     auto rr = e.recall(sq, {}, 2, 60, true);
-    std::printf("[站b recall池] code=%d pool=%zu\n", (int)rr.code, rr.events.size());
+    std::printf("[stage b recall pool] code=%d pool=%zu\n", (int)rr.code, rr.events.size());
     std::map<std::string, int> pool_rank;
     for (size_t i = 0; i < rr.events.size(); ++i) pool_rank[rr.events[i].event->uid] = (int)i + 1;
     for (auto& u : variant_only_uids) {
@@ -250,10 +250,10 @@ int main(int argc, char** argv) {
       const Node* n = e.storage().get_node(u);
       std::string dia = n && n->attrs.count("dia_id") ? n->attrs.at("dia_id") : "?";
       if (it == pool_rank.end())
-        std::printf("  仅靠扩展命中 %s(dia=%s): 未进池\n", u.c_str(), dia.c_str());
+        std::printf("  expansion-only match %s(dia=%s): absent from pool\n", u.c_str(), dia.c_str());
       else {
         auto& se = rr.events[it->second - 1];
-        std::printf("  仅靠扩展命中 %s(dia=%s): 池rank=%d 融合分=%.4f ctx=%.4f\n",
+        std::printf("  expansion-only match %s(dia=%s): pool rank=%d fused score=%.4f ctx=%.4f\n",
                     u.c_str(), dia.c_str(), it->second, se.score, se.context_score);
       }
     }
@@ -266,15 +266,15 @@ int main(int argc, char** argv) {
     std::vector<size_t> ord(cs.size());
     for (size_t i = 0; i < ord.size(); ++i) ord[i] = i;
     std::stable_sort(ord.begin(), ord.end(), [&](size_t a, size_t b) { return cs[a] > cs[b]; });
-    std::printf("[站c 终排BM25] 池内按内容分排序后 top10:");
+    std::printf("[stage c final BM25 ranking] top 10 in pool by content score:");
     for (size_t i = 0; i < ord.size() && i < 10; ++i) {
       auto* n = pool_nodes[ord[i]];
       std::string dia = n->attrs.count("dia_id") ? n->attrs.at("dia_id") : "?";
       std::printf(" %s:%.3f", dia.c_str(), cs[ord[i]]);
     }
-    std::printf("\n  金标 dia:");
+    std::printf("\n  gold dia:");
     for (auto& g : q->evidence_dia_ids) std::printf(" %s", g.c_str());
-    std::printf("\n  仅靠扩展命中事件的终排位次:");
+    std::printf("\n  final ranks of expansion-only matches:");
     for (auto& u : variant_only_uids) {
       int pos = -1;
       for (size_t i = 0; i < ord.size(); ++i)
@@ -285,7 +285,7 @@ int main(int argc, char** argv) {
       for (size_t i = 0; i < pool_nodes.size(); ++i)
         if (pool_nodes[i]->uid == u) content_score = cs[i];
       std::cout << ' ' << u << "(dia=" << dia << "): BM25rank=" << pos
-                << "/得分" << std::fixed << std::setprecision(4) << content_score << ';';
+                << "/score" << std::fixed << std::setprecision(4) << content_score << ';';
     }
     std::printf("\n");
   }

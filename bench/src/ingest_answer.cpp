@@ -680,12 +680,12 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
           ent.evidence_uids = std::move(reranked);
         }
         if ((cfg.rerank_mode == "llm" && cfg.llm_client) || cfg.rerank_mode == "cheap")
-          std::fprintf(stderr, "  [llm-rerank] %s: 实体档案通道提前返回，未重排\n",
+          std::fprintf(stderr, "  [llm-rerank] %s: entity-profile channel returned early, reranking skipped\n",
                        q.id.c_str());
         return ent;
       }
       entity_extra_uids = ent.evidence_uids;  // 不丢：并入标准池（下方按 uid 去重）
-      std::fprintf(stderr, "  [entity-pass] %s: 通道低置信 %.3f < %.2f，%zu 条候选并入标准池\n",
+      std::fprintf(stderr, "  [entity-pass] %s: low channel confidence %.3f < %.2f, merging %zu candidates into standard pool\n",
                    q.id.c_str(), ent.score, cfg.entity_pass_threshold,
                    entity_extra_uids.size());
     }
@@ -813,7 +813,7 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
           }
         }
         auto it = guard_top->attrs.find("dia_id");
-        std::fprintf(stderr, "  [rerank-guard] %s: BM25 榜首 %s（%.3f≥%.2f）豁免，保底首槽\n",
+        std::fprintf(stderr, "  [rerank-guard] %s: top BM25 candidate %s (%.3f>=%.2f) exempt, pinned to first slot\n",
                      q.id.c_str(),
                      it != guard_top->attrs.end() ? it->second.c_str() : "-",
                      top_content, cfg.rerank_guard);
@@ -835,26 +835,26 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
       std::vector<size_t> sel =
           llm_rerank_select(*cfg.llm_client, q, cands, (size_t)cfg.k);
       if (sel.empty()) {
-        std::fprintf(stderr, "  [llm-rerank] %s: LLM 无有效输出，降级 BM25 原序 | 候选: %s\n",
+        std::fprintf(stderr, "  [llm-rerank] %s: no valid LLM output, falling back to BM25 order | candidates: %s\n",
                      q.id.c_str(), cand_dias.c_str());
       } else {
         std::string sel_dias = apply_selection(sel);
         std::ostringstream message;
         message.imbue(std::locale::classic());
-        message << "  [llm-rerank] " << q.id << ": LLM 置顶 " << sel.size() << '/' << n
-                << " 条 | 榜首内容分 " << std::fixed << std::setprecision(3) << top_content
-                << " | 选中: " << sel_dias << " | 候选: " << cand_dias << '\n';
+        message << "  [llm-rerank] " << q.id << ": LLM promoted " << sel.size() << '/' << n
+                << " candidates | top content score " << std::fixed << std::setprecision(3) << top_content
+                << " | selected: " << sel_dias << " | candidates: " << cand_dias << '\n';
         std::cerr << message.str();
       }
     } else if (cfg.rerank_mode == "cheap") {
       // 便宜近似 v1：特征逻辑重排（零 LLM 零网络；未配模型/加载失败 → 降级 BM25 原序）。
       if (cfg.cheap_rerank_path.empty()) {
-        std::fprintf(stderr, "  [cheap-rerank] %s: cheap 档未配模型路径，降级 BM25 原序\n",
+        std::fprintf(stderr, "  [cheap-rerank] %s: model path not configured, falling back to BM25 order\n",
                      q.id.c_str());
       } else {
         const CheapModel& m = load_cheap_model(cfg.cheap_rerank_path);
         if (!m.ok) {
-          std::fprintf(stderr, "  [cheap-rerank] %s: 模型加载失败，降级 BM25 原序\n",
+          std::fprintf(stderr, "  [cheap-rerank] %s: model load failed, falling back to BM25 order\n",
                        q.id.c_str());
         } else {
           std::unordered_set<std::string> e_uids(entity_extra_uids.begin(),
@@ -864,14 +864,14 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
           std::string sel_dias =
               apply_selection(std::vector<size_t>(order_c.begin(), order_c.begin() + kk));
           std::fprintf(stderr,
-                       "  [cheap-rerank] %s: 置顶 %zu/%zu 条 | 榜首内容分 %.3f | 选中: %s\n",
+                       "  [cheap-rerank] %s: promoted %zu/%zu candidates | top content score %.3f | selected: %s\n",
                        q.id.c_str(), kk, evs.size(), top_content, sel_dias.c_str());
         }
       }
     }
     if ((int)evs.size() > cfg.k) evs.resize(cfg.k);
   } else if ((cfg.rerank_mode == "llm" && cfg.llm_client) || cfg.rerank_mode == "cheap") {
-    std::fprintf(stderr, "  [llm-rerank] %s: 候选≤1，未重排\n", q.id.c_str());
+    std::fprintf(stderr, "  [llm-rerank] %s: candidates<=1, reranking skipped\n", q.id.c_str());
   }
 
   ar.score = evs.empty() ? 0.0 : evs.front()->score;

@@ -66,13 +66,13 @@ def main():
         n = harvest(p, freq, boost)
         if p.name == "locomo10.json":
             harvest(p, locomo_raw, 1.0)
-        print(f"[harvest] {p.name}: {n} 词元 (boost x{boost:g})")
+        print(f"[harvest] {p.name}: {n} tokens (boost x{boost:g})")
     top = sorted(freq.items(), key=lambda kv: -kv[1])[:KEEP_TOP]
     # 评测语料覆盖保护：locomo 原始词频>=3 的词强制入选（不计入 12000 名额）
     in_top = {w for w, _ in top}
     extra = sorted([w for w, c in locomo_raw.items() if c >= 3 and w not in in_top])
     words = [w for w, _ in top] + extra
-    print(f"locomo 覆盖保护追加: {len(extra)} 词")
+    print(f"locomo coverage protection: appended {len(extra)} words")
     out = {"conv_vocab_top": [[w, freq[w]] for w in words],
            "stats": {"sources": [p.name for p in SOURCES if p.exists()],
                      "unique_words": len(freq), "kept": len(words)}}

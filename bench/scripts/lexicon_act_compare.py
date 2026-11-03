@@ -58,9 +58,9 @@ def main():
             diffs.append((qid, ca_v, cb_v,
                           (rb or {}).get("category"), (rb or {}).get("qtype")))
     print(f"A={a_path}\nB={b_path}")
-    print(f"覆盖率均值: A={ca/na:.3f} (n={na}, any-hit {ah_a})  "
+    print(f"Mean coverage: A={ca/na:.3f} (n={na}, any-hit {ah_a})  "
           f"B={cb/nb:.3f} (n={nb}, any-hit {ah_b})  Δ={cb/nb-ca/na:+.3f}")
-    print(f"逐题不同: {len(diffs)}/{len(ids)}")
+    print(f"Per-question differences: {len(diffs)}/{len(ids)}")
     for qid, va, vb, cat, qt in diffs:
         print(f"  {qid} cat{cat} {qt}: {va if va is not None else '-'} -> "
               f"{vb if vb is not None else '-'}")

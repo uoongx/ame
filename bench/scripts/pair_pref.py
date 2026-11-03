@@ -28,7 +28,7 @@ jo, ao = stat(old, pref_ids)
 jn, an = stat(new, pref_ids)
 print(f"before: judge {jo}/30  abstain {ao}/30")
 print(f"after : judge {jn}/30  abstain {an}/30")
-print("\n翻转明细：")
+print("\nFlip details:")
 for q in pref_ids:
     o, n = old[q], new.get(q)
     if not n:

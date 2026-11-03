@@ -16,7 +16,7 @@ TAXONOMY = {
     "conv-26:q10": "B", "conv-26:q101": "B", "conv-26:q154": "B",
     "conv-26:q155": "B", "conv-26:q34": "B", "conv-26:q50": "B",
 }
-NEAR_MISS = {"conv-26:q104": "q104型近失(lmem pool_rank 8)"}
+NEAR_MISS = {"conv-26:q104": "q104 near-miss (lmem pool_rank 8)"}
 
 
 def load(path):
@@ -67,7 +67,7 @@ def main():
     ids = sorted(set(A) | set(B))
     ca = cb = 0.0
     na = nb = ah_a = ah_b = 0
-    print(f"{'qid':<16}{'cat':<4}{'tax':<5}{'cov_off':<9}{'cov_exp':<9}{'Δ':<8}rerank 状态")
+    print(f"{'qid':<16}{'cat':<4}{'tax':<5}{'cov_off':<9}{'cov_exp':<9}{'Δ':<8}rerank status")
     rescued, lost = [], []
     for qid in ids:
         ra, rb = A.get(qid), B.get(qid)
@@ -78,10 +78,10 @@ def main():
         if ca_v is not None and cb_v is not None:
             d = cb_v - ca_v
             if d > 0:
-                mark = "← 救回"
+                mark = "<- rescued"
                 rescued.append(qid)
             elif d < 0:
-                mark = "← 丢失"
+                mark = "<- lost"
                 lost.append(qid)
         if ca_v is not None:
             ca += ca_v
@@ -92,7 +92,7 @@ def main():
             nb += 1
             ah_b += any_hit(rb)
         cat = (ra or rb).get("category", "?")
-        rstat = st.get(qid, "-（通道未触发/实体通道提前返回）")
+        rstat = st.get(qid, "- (channel not triggered or entity channel returned early)")
         row = f"{qid:<16}{cat:<4}{tax:<5}"
         row += f"{ca_v if ca_v is not None else '-':<9}"
         row += f"{cb_v if cb_v is not None else '-':<9}"
@@ -100,15 +100,16 @@ def main():
         row += f"{rstat} {mark}"
         print(row)
     print()
-    print(f"覆盖率均值: off={ca/na:.3f} (n={na}, any-hit {ah_a})  "
+    print(f"Mean coverage: off={ca/na:.3f} (n={na}, any-hit {ah_a})  "
           f"exp={cb/nb:.3f} (n={nb}, any-hit {ah_b})  Δ={cb/nb - ca/na:+.3f}")
-    print(f"救回: {rescued}")
-    print(f"丢失: {lost}")
-    engaged = [k for k, v in st.items() if "置顶" in v]
-    degraded = [k for k, v in st.items() if "降级" in v]
-    print(f"重排触发 {len(st)} 题（置顶 {len(engaged)}，降级 {len(degraded)}）")
+    print(f"Rescued: {rescued}")
+    print(f"Lost: {lost}")
+    engaged = [k for k, v in st.items() if "置顶" in v or v.startswith("LLM promoted ")]
+    degraded = [k for k, v in st.items() if "降级" in v
+                or v.startswith("no valid LLM output, falling back to BM25 order")]
+    print(f"Reranking triggered for {len(st)} questions (promoted {len(engaged)}, demoted {len(degraded)})")
     if degraded:
-        print(f"降级题: {sorted(degraded)}")
+        print(f"Demoted questions: {sorted(degraded)}")
 
 
 if __name__ == "__main__":

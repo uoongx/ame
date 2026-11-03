@@ -170,13 +170,13 @@ public class MemoryOrchestrator {
                        boolean webSearch, boolean deepRerank) {
         long now = System.currentTimeMillis() / 1000;
         List<Message> history = store.loadMessages(sessionId);
-        Log.d(TAG, "[" + sessionId + "] chat 开始: user=" + take(userText, 80)
-                + " 带图=" + (imagePath != null) + " 联网=" + webSearch
-                + " 重排=" + deepRerank
-                + " history=" + history.size() + "条");
+        Log.d(TAG, "[" + sessionId + "] Chat started: userChars=" + userText.length()
+                + " hasImagePath=" + (imagePath != null) + " webSearch=" + webSearch
+                + " deepRerank=" + deepRerank
+                + " historyMessages=" + history.size());
 
         String memoryText = memoryTextForTurn(userText, imageB64);
-        Log.d(TAG, "[" + sessionId + "] 记忆文本: " + take(memoryText, 120));
+        Log.d(TAG, "[" + sessionId + "] Memory text prepared: chars=" + memoryText.length());
         String searchText = searchForTurn(userText, imageB64, memoryText, webSearch);
 
         // 先取证和装配，再作答；当前问题不入图、不占证据位。
@@ -184,8 +184,7 @@ public class MemoryOrchestrator {
         List<MiniMaxClient.Msg> msgs = assemble(query, history, userText, imageB64,
                 webSearch, searchText, deepRerank);
         String reply = MiniMaxClient.chat(msgs);
-        Log.d(TAG, "[" + sessionId + "] 回复 " + reply.length() + "字: "
-                + take(reply.replace('\n', ' '), 100));
+        Log.d(TAG, "[" + sessionId + "] Reply received: chars=" + reply.length());
 
         // 作答成功才写入整轮；模型或装配抛异常时不进入持久化阶段。
         persistSuccessfulTurn(memoryText, reply, imagePath, now);
@@ -211,10 +210,11 @@ public class MemoryOrchestrator {
         try {
             String query = searchQueryForTurn(userText, imageB64, memoryText);
             String searchText = MiniMaxClient.webSearch(query);
-            Log.d(TAG, "[" + sessionId + "] 联网检索完成 " + searchText.length() + "字");
+            Log.d(TAG, "[" + sessionId + "] Web search completed: resultChars=" + searchText.length());
             return searchText;
         } catch (Exception e) {
-            Log.e(TAG, "[" + sessionId + "] 联网搜索失败，降级为不联网作答", e);
+            Log.e(TAG, "[" + sessionId + "] Web search failed; falling back to an offline answer"
+                    + " errorType=" + e.getClass().getSimpleName());
             return null;
         }
     }
@@ -228,7 +228,7 @@ public class MemoryOrchestrator {
                     ? "图片内容：" + description
                     : query + "\n（附图内容：" + description + "）";
         }
-        Log.d(TAG, "[" + sessionId + "] 联网+带图：M3 vision 解析并入查询");
+        Log.d(TAG, "[" + sessionId + "] Image search query prepared with M3 vision");
         return query;
     }
 
@@ -240,9 +240,9 @@ public class MemoryOrchestrator {
         store.appendMessage(sessionId, new Message("assistant", reply, now + 1, null));
         int rcS = 0;
         if (++turnCount % SAVE_EVERY == 0) rcS = engine.save();
-        Log.d(TAG, "[" + sessionId + "] rememberTurn(整轮) rc=" + rc
-                + (turnCount % SAVE_EVERY == 0 ? " save rc=" + rcS : " (快照节流)")
-                + "，本轮完成");
+        Log.d(TAG, "[" + sessionId + "] rememberTurn(full turn) rc=" + rc
+                + (turnCount % SAVE_EVERY == 0 ? " save rc=" + rcS : " snapshot=deferred")
+                + " turn=completed");
     }
 
     // assemble 伪代码：system（人设+档案+recall 证据[+联网搜索结果]）+ 滑窗轮次
@@ -283,8 +283,8 @@ public class MemoryOrchestrator {
         // 截断到 SEARCH_MAX_CHARS，防超长搜索结果撑爆单轮上下文）
         if (searchText != null && !searchText.isEmpty()) {
             if (searchText.length() > SEARCH_MAX_CHARS) {
-                Log.d(TAG, "[" + sessionId + "] 联网结果截断 " + searchText.length()
-                        + "→" + SEARCH_MAX_CHARS + "字");
+                Log.d(TAG, "[" + sessionId + "] Web search result truncated: originalChars="
+                        + searchText.length() + " maxChars=" + SEARCH_MAX_CHARS);
                 searchText = searchText.substring(0, SEARCH_MAX_CHARS)
                         + "\n……（搜索结果过长已截断）";
             }
@@ -310,11 +310,11 @@ public class MemoryOrchestrator {
         }
         lastSentTokens = tok + withImage * IMAGE_TOKENS;
 
-        Log.d(TAG, "[" + sessionId + "] 装配完成: system=" + system.length() + "字 "
-                + "滑窗=" + window.size() + "条 messages=" + msgs.size() + "条 "
-                + (searchText != null ? "联网结果=" + searchText.length() + "字 " : "")
-                + (deepRerank ? "深度重排=" + evidence.size() + "条 " : "")
-                + "~" + lastSentTokens + "tok");
+        Log.d(TAG, "[" + sessionId + "] Context assembled: systemChars=" + system.length()
+                + " windowMessages=" + window.size() + " messages=" + msgs.size()
+                + (searchText != null ? " searchResultChars=" + searchText.length() : "")
+                + (deepRerank ? " rerankedEvidence=" + evidence.size() : "")
+                + " estimatedTokens=" + lastSentTokens);
         diagLog.addLast(new TurnDiag(query, system, evidence,
                 new ArrayList<>(msgs), webSearch, searchText, deepRerank,
                 lastSentTokens, System.currentTimeMillis()));
@@ -334,24 +334,24 @@ public class MemoryOrchestrator {
         int skipped = 0;
         String recallRaw = engine.recall(query, limit);
         JSONArray evs = new JSONArray(recallRaw);
-        Log.d(TAG, "[" + sessionId + "] recall查询='" + query + "' -> "
-                + evs.length() + "条去重后证据");
+        Log.d(TAG, "[" + sessionId + "] Recall completed: queryChars=" + query.length()
+                + " deduplicatedEvidence=" + evs.length());
         for (int i = 0; i < evs.length(); i++) {
             JSONObject e = evs.getJSONObject(i);
             String txt = e.getString("text");
             if (windowTexts.contains(txt)) {   // `in` 集合判断
                 skipped++;
-                Log.d(TAG, "[" + sessionId + "]   证据[" + (i + 1) + "] 跳过（滑窗已含）: "
-                        + take(txt, 60));
+                Log.d(TAG, "[" + sessionId + "] Evidence[" + (i + 1)
+                        + "] skipped: reason=window_overlap chars=" + txt.length());
                 continue;
             }
             items.add(new EvidenceItem(txt, e.getLong("ts"), e.optDouble("score")));
-            Log.d(TAG, "[" + sessionId + "]   证据[" + items.size() + "] score="
-                    + e.optDouble("score") + " " + take(txt, 80));
+            Log.d(TAG, "[" + sessionId + "] Evidence[" + items.size() + "] score="
+                    + e.optDouble("score") + " chars=" + txt.length());
         }
-        if (skipped > 0) Log.d(TAG, "[" + sessionId + "] 滑窗重叠过滤 " + skipped + " 条");
+        if (skipped > 0) Log.d(TAG, "[" + sessionId + "] Window overlap filtered: count=" + skipped);
         if (items.isEmpty()) {
-            Log.w(TAG, "[" + sessionId + "] recall 无有效证据（滑窗过滤后为空）——模型本轮收不到记忆");
+            Log.w(TAG, "[" + sessionId + "] Recall has no evidence after window filtering; no memory injected");
         }
         return items;
     }
@@ -363,8 +363,8 @@ public class MemoryOrchestrator {
     //   证据可注入。
     private List<EvidenceItem> deepRerank(String query, List<EvidenceItem> items) {
         if (items.size() <= DEEP_RERANK_TOP_K) {
-            Log.d(TAG, "[" + sessionId + "] 深度重排：候选 " + items.size()
-                    + "≤" + DEEP_RERANK_TOP_K + " 条，全留不重排");
+            Log.d(TAG, "[" + sessionId + "] Deep rerank skipped: candidates=" + items.size()
+                    + " topK=" + DEEP_RERANK_TOP_K + " allCandidatesRetained=true");
             return items;
         }
         List<String> texts = new ArrayList<>(items.size());
@@ -374,13 +374,13 @@ public class MemoryOrchestrator {
             picked = MiniMaxClient.rerank(query, texts, DEEP_RERANK_TOP_K);
         } catch (Exception e) {
             // rerank 内部已兜底异常→空表；这里再兜一层防回归
-            Log.e(TAG, "[" + sessionId + "] 深度重排异常，降级原序 top-"
-                    + DEEP_RERANK_TOP_K, e);
+            Log.e(TAG, "[" + sessionId + "] Deep rerank failed; falling back to original order: topK="
+                    + DEEP_RERANK_TOP_K + " errorType=" + e.getClass().getSimpleName());
             picked = new ArrayList<>();
         }
         if (picked.isEmpty()) {
-            Log.d(TAG, "[" + sessionId + "] 深度重排降级：原序 top-" + DEEP_RERANK_TOP_K
-                    + "（池 " + items.size() + " 条）");
+            Log.d(TAG, "[" + sessionId + "] Deep rerank fallback: originalOrderTopK="
+                    + DEEP_RERANK_TOP_K + " candidates=" + items.size());
             return new ArrayList<>(items.subList(0, DEEP_RERANK_TOP_K));
         }
         List<EvidenceItem> out = new ArrayList<>(picked.size());
@@ -390,8 +390,8 @@ public class MemoryOrchestrator {
             if (sel.length() > 0) sel.append(',');
             sel.append(idx + 1);
         }
-        Log.d(TAG, "[" + sessionId + "] 深度重排：池 " + items.size() + " 条 → 选中 "
-                + out.size() + " 条（池内序号: " + sel + "）");
+        Log.d(TAG, "[" + sessionId + "] Deep rerank completed: candidates=" + items.size()
+                + " selected=" + out.size() + " candidateIndices=" + sel);
         return out;
     }
 
@@ -450,8 +450,8 @@ public class MemoryOrchestrator {
                 String line = "- [" + d + "] " + it.text;
                 evidence.add(line);
                 sb.append("\n").append(line);
-                Log.d(TAG, "[" + sessionId + "]   注入证据[" + evidence.size() + "] score="
-                        + it.score + " ts=" + d + " " + take(it.text, 80));
+                Log.d(TAG, "[" + sessionId + "] Injected evidence[" + evidence.size() + "] score="
+                        + it.score + " ts=" + d + " chars=" + it.text.length());
             }
         }
         return new PromptResult(sb.toString(), evidence);

@@ -18,7 +18,7 @@ for path in glob.glob(f"{BASE}/lexicon_src/domain/*.txt"):
         p = ln.rstrip("\n").split("\t")
         if len(p) >= 2 and p[1].isdigit():
             freq[p[0]] = max(freq.get(p[0], 0), int(p[1]))
-print("全库词条:", len(freq))
+print("Total dictionary entries:", len(freq))
 
 # 已覆盖词集合：三本中文词典 + 英文词典的主词
 covered = set()
@@ -49,5 +49,5 @@ cands.sort(key=lambda x: -x[1])
 target = cands[:TOP_N]
 json.dump({"conv_vocab_top": [[w, f] for w, f in target], "question_vocab_top": []},
           open(f"{BASE}/vocab_hf.json", "w", encoding="utf-8"), ensure_ascii=False)
-print(f"已覆盖跳过: {skip_cov}  格式过滤: {skip_bad}  候选: {len(cands)}  目标: {len(target)}")
+print(f"Skipped as covered: {skip_cov}  filtered by format: {skip_bad}  candidates: {len(cands)}  targets: {len(target)}")
 print("top10:", [w for w, _ in target[:10]])

@@ -127,7 +127,8 @@ abstract class BaseConversationActivity extends AppCompatActivity {
             io = ConversationWorkQueue.acquire(sessionDir);
             io.execute(this::initializeEngine);
         } catch (IOException error) {
-            Log.e(MemoryOrchestrator.TAG, "无法打开会话目录", error);
+            Log.e(MemoryOrchestrator.TAG, "Unable to open session directory; error_type="
+                    + error.getClass().getSimpleName());
             showFailure("记忆加载失败: ", error);
         }
     }
@@ -142,7 +143,8 @@ abstract class BaseConversationActivity extends AppCompatActivity {
             runOnUiThread(this::showEngineReady);
         } catch (Exception error) {
             closeEngine();
-            Log.e(MemoryOrchestrator.TAG, "[" + sessionId + "] 记忆加载失败", error);
+            Log.e(MemoryOrchestrator.TAG, "[" + sessionId + "] Memory initialization failed; error_type="
+                    + error.getClass().getSimpleName());
             runOnUiThread(() -> showFailure("记忆加载失败: ", error));
         }
     }
@@ -194,7 +196,8 @@ abstract class BaseConversationActivity extends AppCompatActivity {
             String reply = orchestrator.chat(text, image, null, search, rerank);
             runOnUiThread(() -> completeReply(pending, reply));
         } catch (Exception error) {
-            Log.e(MemoryOrchestrator.TAG, "[" + sessionId + "] 请求失败", error);
+            Log.e(MemoryOrchestrator.TAG, "[" + sessionId + "] Request failed; error_type="
+                    + error.getClass().getSimpleName());
             runOnUiThread(() -> failReply(pending, error));
         }
     }
@@ -252,7 +255,8 @@ abstract class BaseConversationActivity extends AppCompatActivity {
             List<MemoryOrchestrator.TurnDiag> snapshot = orchestrator.diag();
             runOnUiThread(() -> showStatus(line, snapshot));
         } catch (Exception error) {
-            Log.w(MemoryOrchestrator.TAG, "统计读取失败，保留原状态栏", error);
+            Log.w(MemoryOrchestrator.TAG, "Unable to read statistics; retaining previous status; error_type="
+                    + error.getClass().getSimpleName());
         }
     }
 
@@ -314,7 +318,8 @@ abstract class BaseConversationActivity extends AppCompatActivity {
         try {
             Files.deleteIfExists(cameraFile.toPath());
         } catch (IOException error) {
-            Log.w(MemoryOrchestrator.TAG, "清理拍照临时文件失败", error);
+            Log.w(MemoryOrchestrator.TAG, "Unable to delete temporary camera file; error_type="
+                    + error.getClass().getSimpleName());
         }
         cameraFile = null;
         cameraOut = null;

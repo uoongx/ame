@@ -61,8 +61,9 @@ def load_labels(log_paths):
     跨运行 uid 噪声使单轮候选集/选中集合有边界翻转：任一运行选中即正例
     （降低假阴性）；被某轮展示但从未选中才记负例；从未展示的候选不入对。"""
     labels = {}
-    rx = re.compile(r"\[llm-rerank\]\s+(\S+?):\s+LLM 置顶 \d+/\d+ 条 \| 榜首内容分 [\d.]+ \| "
-                    r"选中: (.*?) \| 候选: (.*)$")
+    rx = re.compile(r"\[llm-rerank\]\s+(\S+?):\s+LLM (?:置顶|promoted) \d+/\d+ "
+                    r"(?:条|candidates) \| (?:榜首内容分|top content score) [\d.]+ \| "
+                    r"(?:选中|selected): (.*?) \| (?:候选|candidates): (.*)$")
     for log_path in log_paths:
         for line in open(log_path, encoding="utf-8", errors="replace"):
             m = rx.search(line)
@@ -190,8 +191,8 @@ def main():
     labels = load_labels(a.log)
     pairs, stats = build_pairs(a.pools, labels)
     n_pos = sum(y for _, y, _ in pairs)
-    print(f"训练对: {len(pairs)}（正例 {n_pos} = {n_pos/len(pairs):.1%}）"
-          f" 题数 {len(set(q for _,_,q in pairs))} 标注: {stats}（label_only_skip=从未被 LLM 看见而剔除）")
+    print(f"Training pairs: {len(pairs)} (positive {n_pos} = {n_pos/len(pairs):.1%})"
+          f" questions {len(set(q for _,_,q in pairs))} labels: {stats} (label_only_skip=excluded because never seen by the LLM)")
 
     # 5-fold GroupKFold by question_id
     qids = sorted(set(q for _, _, q in pairs))
@@ -222,7 +223,7 @@ def main():
         b_hits.append(hit)
     print(f"5-fold CV: AUC = {sum(aucs)/len(aucs):.3f} "
           f"[{', '.join(f'{a_:.3f}' for a_ in aucs)}]")
-    print(f"5-fold CV: 正例 top-10 召回(宏平均) = {sum(recalls)/len(recalls):.3f} "
+    print(f"5-fold CV: positive top-10 recall (macro average) = {sum(recalls)/len(recalls):.3f} "
           f"[{', '.join(f'{r:.3f}' for r in recalls)}]")
 
     # 全量训练 → 持久化
@@ -234,8 +235,8 @@ def main():
                       "labels": "m12 LLM top-10", "note": "is_entity 训练恒0"}}
     with open(a.out, "w", encoding="utf-8") as f:
         json.dump(model, f, ensure_ascii=False, indent=1)
-    print(f"模型已写 {a.out}")
-    print("权重:", {k: round(v, 3) for k, v in zip(FEATURES, w)}, "bias:", round(b, 3))
+    print(f"Model written to {a.out}")
+    print("weights:", {k: round(v, 3) for k, v in zip(FEATURES, w)}, "bias:", round(b, 3))
 
 
 if __name__ == "__main__":

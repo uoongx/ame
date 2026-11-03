@@ -36,8 +36,8 @@ def judge_of(r):
         return j.get("score", j.get("correct"))
     return j
 
-print(f"a 组题数={len(a)}  c 组题数={len(c)}")
-print(f"{'question_id':<22} {'a(逐条top10)':>12} {'c(预滤+批量)':>12}  翻转")
+print(f"group_a_questions={len(a)}  group_c_questions={len(c)}")
+print(f"{'question_id':<22} {'a(turn-top10)':>12} {'c(pre+batch)':>12}  flips")
 flips_up, flips_down, both = 0, 0, 0
 a_scores, c_scores = [], []
 for qid in sorted(set(a) | set(c)):
@@ -46,15 +46,15 @@ for qid in sorted(set(a) | set(c)):
     mark = ""
     if ja is not None and jc is not None:
         a_scores.append(ja); c_scores.append(jc)
-        if jc > ja: flips_up += 1; mark = "↑ 改善"
-        elif jc < ja: flips_down += 1; mark = "↓ 退化"
-        else: mark = "= 持平"
+        if jc > ja: flips_up += 1; mark = "up: improved"
+        elif jc < ja: flips_down += 1; mark = "down: degraded"
+        else: mark = "= unchanged"
     print(f"{qid:<22} {str(ja):>12} {str(jc):>12}  {mark}")
 print()
 if a_scores:
-    print(f"配对题数={len(a_scores)}  a 组 judge 均值={sum(a_scores)/len(a_scores):.3f}  c 组 judge 均值={sum(c_scores)/len(c_scores):.3f}")
-    print(f"改善 {flips_up} 题 / 退化 {flips_down} 题")
+    print(f"paired_questions={len(a_scores)}  group_a_mean_judge={sum(a_scores)/len(a_scores):.3f}  group_c_mean_judge={sum(c_scores)/len(c_scores):.3f}")
+    print(f"Improved {flips_up} questions / degraded {flips_down} questions")
 if c:
     allc = [judge_of(r) for r in c.values() if judge_of(r) is not None]
     if allc:
-        print(f"c 组全量（{len(allc)} 题）judge 均值={sum(allc)/len(allc):.3f}  命中={sum(1 for x in allc if x>0)}")
+        print(f"group c total ({len(allc)} questions), mean judge={sum(allc)/len(allc):.3f}  hits={sum(1 for x in allc if x>0)}")

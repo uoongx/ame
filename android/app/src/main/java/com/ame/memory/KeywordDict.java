@@ -36,18 +36,19 @@ public final class KeywordDict {
             if (!dir.exists()) dir.mkdirs();
             File dict = new File(dir, DICT_NAME);
             if (!dict.exists()) {
-                Log.i(TAG, "首次运行：从 assets 拷贝关键词词典 " + DICT_NAME);
+                Log.i(TAG, "First run: copying keyword dictionary from assets: " + DICT_NAME);
                 copyAsset(ctx, DICT_NAME, dict);
             }
             File cache = new File(dir, AC_NAME);
             int n = engine.loadKeywordDict(dict.getCanonicalPath(), cache.getCanonicalPath());
             if (n >= 0) {
-                if (!attempted) Log.i(TAG, "关键词词典加载完成: " + n + " 条");
+                if (!attempted) Log.i(TAG, "Keyword dictionary loaded: entries=" + n);
             } else {
-                Log.e(TAG, "关键词词典加载失败（召回退回二元组兜底）");
+                Log.e(TAG, "Keyword dictionary load failed; recall will fall back to character bigrams");
             }
         } catch (Exception e) {
-            Log.e(TAG, "词典加载异常（召回退回二元组兜底）", e);
+            Log.e(TAG, "Keyword dictionary load error; recall will fall back to character bigrams; error_type="
+                    + e.getClass().getSimpleName());
         } finally {
             attempted = true;
         }

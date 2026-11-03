@@ -60,7 +60,8 @@ public class GuideActivity extends BaseConversationActivity {
         try {
             return new String(Files.readAllBytes(guide.toPath()), StandardCharsets.UTF_8);
         } catch (IOException error) {
-            Log.w(MemoryOrchestrator.TAG, "读取导览方案失败，继续展示可用内容", error);
+            Log.w(MemoryOrchestrator.TAG, "Unable to read guide plan; showing available content; error_type="
+                    + error.getClass().getSimpleName());
             return null;
         }
     }
@@ -100,7 +101,8 @@ public class GuideActivity extends BaseConversationActivity {
         try {
             return BitmapFactory.decodeFile(image.getCanonicalPath());
         } catch (IOException error) {
-            Log.w(MemoryOrchestrator.TAG, "读取方案图片失败，继续展示其他内容", error);
+            Log.w(MemoryOrchestrator.TAG, "Unable to read plan image; showing remaining content; error_type="
+                    + error.getClass().getSimpleName());
             return null;
         }
     }

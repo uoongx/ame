@@ -40,27 +40,27 @@ using ame::bench_cli::parse_args;
 
 void usage() {
   std::fprintf(stderr,
-               "用法: ame_bench --dataset locomo|longmemeval|beam --data <path>\n"
+               "Usage: ame_bench --dataset locomo|longmemeval|beam --data <path>\n"
                "      [--extractor rule|llm] [--answer baseline|llm] [--judge f1|llm]\n"
                "      [--limit N] [--k 10] [--concurrency 8] [--model deepseek-v4-flash]\n"
                "      [--cache-dir bench/cache] [--config bench/config/deepseek.local.json]\n"
                "      [--out report.json] [--abstain-threshold 0.15] [--abstain-categories 5]\n"
-               "      [--dump results.ndjson]（逐题结果落盘，失败分析用）\n"
-               "      [--stem-en]（graph：M3 英文保守词干归一，查询/写入双侧，默认关）\n"
-               "      [--word-sim FILE]（graph：词级近似表软匹配，graded sim，默认关）\n"
-               "      [--name-alias FILE]（graph：人名/专名严等价别名表 names_zh.json，\n"
-               "       摄入前灌入 M3 别名+M1 词面+M2 实体，默认关）\n"
-               "      [--rerank bm25|cheap|llm]（graph：终排模式；默认 bm25=纯词面。\n"
-               "       cheap=特征重排器零LLM需 --cheap-rerank PATH；llm=全池LLM打分）\n"
-               "      [--llm-prompt-pin]（llm 档 prompt 变体：词面精确命中必须保留靠前）\n"
-               "      [--entity-pass-threshold X]（graph：实体档案通道低置信放行——通道榜首\n"
-               "       内容分 < X 时候选并入标准管道池；默认 -1=关=现状；建议实验值 0.5）\n"
-               "      [--rerank-guard X]（graph：LLM 重排时 BM25 榜首内容分 ≥ X 则豁免、\n"
-               "       保底 top-k 首槽；默认 -1=关；建议实验值 0.8）\n"
-               "      [--cheap-rerank PATH]（graph：特征逻辑重排器替代 LLM 打分，零 LLM；\n"
-               "       模型由 cheap_rerank_train.py 训练；默认空=关）\n"
-               "      [--final-alpha 0.6 --final-beta 0.4]（graph：L2 终排混合 BM25+融合分）\n"
-               "API key: bench/config/deepseek.local.json 或环境变量 AME_DEEPSEEK_API_KEY\n");
+               "      [--dump results.ndjson] (save per-question results for failure analysis)\n"
+               "      [--stem-en] (graph: conservative M3 English stemming for queries/writes; off by default)\n"
+               "      [--word-sim FILE] (graph: word similarity table for soft matching; off by default)\n"
+               "      [--name-alias FILE] (graph: strictly equivalent person/proper-name aliases in names_zh.json;\n"
+               "       seed M3 aliases, M1 surface forms and M2 entities before ingestion; off by default)\n"
+               "      [--rerank bm25|cheap|llm] (graph: final ranking mode; default bm25=lexical only;\n"
+               "       cheap=feature ranker without LLM, requires --cheap-rerank PATH; llm=LLM scores the full pool)\n"
+               "      [--llm-prompt-pin] (LLM prompt variant: keep exact lexical matches near the top)\n"
+               "      [--entity-pass-threshold X] (graph: merge entity-channel candidates into the standard pool\n"
+               "       when its top content score < X; default -1=off; suggested experimental value 0.5)\n"
+               "      [--rerank-guard X] (graph: during LLM reranking, pin the top BM25 candidate in the first\n"
+               "       top-k slot if its content score >= X; default -1=off; suggested experimental value 0.8)\n"
+               "      [--cheap-rerank PATH] (graph: feature-based logistic ranker replaces LLM scoring; no LLM;\n"
+               "       model trained by cheap_rerank_train.py; default empty=off)\n"
+               "      [--final-alpha 0.6 --final-beta 0.4] (graph: L2 final ranking mixes BM25 and fused scores)\n"
+               "API key: bench/config/deepseek.local.json or environment variable AME_DEEPSEEK_API_KEY\n");
 }
 
 }  // namespace
@@ -81,11 +81,11 @@ int main(int argc, char** argv) {
   {
     std::string mode = cli.rerank_mode.empty() ? "bm25" : cli.rerank_mode;
     if (mode != "bm25" && mode != "cheap" && mode != "llm") {
-      std::fprintf(stderr, "未知 --rerank 模式: %s（仅支持 bm25|cheap|llm）\n", mode.c_str());
+      std::fprintf(stderr, "Unknown --rerank mode: %s (expected bm25|cheap|llm)\n", mode.c_str());
       return 1;
     }
     if (mode == "cheap" && cli.cheap_rerank.empty()) {
-      std::fprintf(stderr, "--rerank cheap 需 --cheap-rerank PATH（模型 JSON）\n");
+      std::fprintf(stderr, "--rerank cheap requires --cheap-rerank PATH (model JSON)\n");
       return 1;
     }
     cli.cfg.cheap_rerank_path = cli.cheap_rerank;     // --cheap-rerank（默认空=关）
@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
     auto client = DeepSeekClient::from_config(cli.cfg.config_path, cli.cfg.model,
                                               cli.cfg.cache_dir);
     if (!client) {
-      std::fprintf(stderr, "未找到 API key\n");
+      std::fprintf(stderr, "API key not found\n");
       return 1;
     }
     std::vector<std::string> vocabs;
@@ -115,10 +115,10 @@ int main(int argc, char** argv) {
     int added = build_lexicon_json(*client, vocabs, cli.lexicon_out,
                                    cli.lexicon_topn, 50, cli.cfg.concurrency);
     if (added < 0) {
-      std::fprintf(stderr, "词典构建失败\n");
+      std::fprintf(stderr, "Lexicon build failed\n");
       return 1;
     }
-    std::fprintf(stderr, "[lexicon] %s 新增 %d 条（api_calls=%d cache_hits=%d）\n",
+    std::fprintf(stderr, "[lexicon] %s added %d entries (api_calls=%d cache_hits=%d)\n",
                  cli.lexicon_out.c_str(), added, client->api_calls(), client->cache_hits());
     return 0;
   }
@@ -130,16 +130,16 @@ int main(int argc, char** argv) {
     auto client = DeepSeekClient::from_config(cli.cfg.config_path, cli.cfg.model,
                                               cli.cfg.cache_dir);
     if (!client) {
-      std::fprintf(stderr, "未找到 API key\n");
+      std::fprintf(stderr, "API key not found\n");
       return 1;
     }
     int pairs = validate_lexicon_json(*client, cli.validate_lexicon, cli.lexicon_out,
                                       50, cli.cfg.concurrency);
     if (pairs < 0) {
-      std::fprintf(stderr, "校验失败（输入不可读或解析失败）\n");
+      std::fprintf(stderr, "Validation failed (input unreadable or parse failed)\n");
       return 1;
     }
-    std::fprintf(stderr, "[validate] %s -> %s（%d 对，api_calls=%d cache_hits=%d）\n",
+    std::fprintf(stderr, "[validate] %s -> %s (%d pairs, api_calls=%d cache_hits=%d)\n",
                  cli.validate_lexicon.c_str(), cli.lexicon_out.c_str(), pairs,
                  client->api_calls(), client->cache_hits());
     return 0;
@@ -151,16 +151,16 @@ int main(int argc, char** argv) {
     auto client = DeepSeekClient::from_config(cli.cfg.config_path, cli.cfg.model,
                                               cli.cfg.cache_dir);
     if (!client) {
-      std::fprintf(stderr, "未找到 API key\n");
+      std::fprintf(stderr, "API key not found\n");
       return 1;
     }
     int pairs = score_word_sims(*client, cli.score_sims, cli.lexicon_out, 50,
                                 cli.cfg.concurrency);
     if (pairs < 0) {
-      std::fprintf(stderr, "打分失败（输入不可读或解析失败）\n");
+      std::fprintf(stderr, "Scoring failed (input unreadable or parse failed)\n");
       return 1;
     }
-    std::fprintf(stderr, "[score-sims] %s -> %s（%d 对，api_calls=%d cache_hits=%d）\n",
+    std::fprintf(stderr, "[score-sims] %s -> %s (%d pairs, api_calls=%d cache_hits=%d)\n",
                  cli.score_sims.c_str(), cli.lexicon_out.c_str(), pairs,
                  client->api_calls(), client->cache_hits());
     return 0;
@@ -177,11 +177,11 @@ int main(int argc, char** argv) {
   else if (cli.dataset == "longmemeval") cases = load_longmemeval(cli.data);
   else if (cli.dataset == "beam") cases = load_beam(cli.data);
   else {
-    std::fprintf(stderr, "未知数据集: %s\n", cli.dataset.c_str());
+    std::fprintf(stderr, "Unknown dataset: %s\n", cli.dataset.c_str());
     return 1;
   }
   if (cases.empty()) {
-    std::fprintf(stderr, "未加载到数据（文件缺失或结构不符）: %s\n", cli.data.c_str());
+    std::fprintf(stderr, "No data loaded (file missing or unexpected structure): %s\n", cli.data.c_str());
     return 1;
   }
   if (cli.limit > 0 && (int)cases.size() > cli.limit) cases.resize(cli.limit);
@@ -210,7 +210,7 @@ int main(int argc, char** argv) {
     std::filesystem::create_directories(cli.cfg.cache_dir);
     client = DeepSeekClient::from_config(cli.cfg.config_path, cli.cfg.model, cli.cfg.cache_dir);
     if (!client) {
-      std::fprintf(stderr, "未找到 API key（%s 或 AME_DEEPSEEK_API_KEY）\n",
+      std::fprintf(stderr, "API key not found (%s or AME_DEEPSEEK_API_KEY)\n",
                    cli.cfg.config_path.c_str());
       return 1;
     }
@@ -260,7 +260,7 @@ int main(int argc, char** argv) {
         st.events = (int)e.storage().nodes_of_kind(NodeKind::Event).size();
         st.entities = (int)e.storage().nodes_of_kind(NodeKind::Entity).size();
         st.keywords = (int)e.storage().nodes_of_kind(NodeKind::Keyword).size();
-        std::fprintf(stderr, "[graph] %s 加载 %s\n", c.conversation_id.c_str(),
+        std::fprintf(stderr, "[graph] %s loaded %s\n", c.conversation_id.c_str(),
                      gpath.c_str());
       }
     }
@@ -291,7 +291,7 @@ int main(int argc, char** argv) {
       if (!cli.save_graph.empty()) {
         std::string sp = cli.save_graph + "." + c.conversation_id + ".json";
         if (e.save(sp) == Err::Ok)
-          std::fprintf(stderr, "[graph] %s 保存 %s\n", c.conversation_id.c_str(),
+          std::fprintf(stderr, "[graph] %s saved %s\n", c.conversation_id.c_str(),
                        sp.c_str());
       }
     }
@@ -328,7 +328,7 @@ int main(int argc, char** argv) {
           job.evs.push_back(evidence_date_prefix(n->ts) + n->text);
         }
         if (total > kept)
-          std::fprintf(stderr, "  [prefilter] %s: 候选 %d → 保留 %d（砍 %d）\n",
+          std::fprintf(stderr, "  [prefilter] %s: candidates %d -> kept %d (removed %d)\n",
                        q.id.c_str(), total, kept, total - kept);
         if (kept > 0) agg_jobs.push_back(std::move(job));
       }
@@ -374,7 +374,7 @@ int main(int argc, char** argv) {
         }
       }
       if (!jobs.empty())
-        std::fprintf(stderr, "[llm] 两阶段聚合 %zu 题：预过滤+批量提取 %zu 次...\n",
+        std::fprintf(stderr, "[llm] two-stage aggregation for %zu questions: prefilter + %zu batch extractions...\n",
                      jobs.size(), ex_reqs.size());
       auto ex_resps = client->chat_batch(ex_reqs, cli.cfg.concurrency);
       // 阶段二：按题聚合事实列表
@@ -397,7 +397,7 @@ int main(int argc, char** argv) {
         ag_reqs.push_back(llm_ans->build_aggregate_request(
             pendings[ti].q->question, pendings[ti].q->question_date, facts));
         ag_map.push_back(ti);
-        std::fprintf(stderr, "  [agg] %s: %zu 条事实（%zu 次提取）\n",
+        std::fprintf(stderr, "  [agg] %s: %zu facts (%zu extractions)\n",
                      pendings[ti].q->id.c_str(), facts.size(),
                      (jobs[ji].evs.size() + cli.cfg.agg_batch - 1) / cli.cfg.agg_batch);
       }
@@ -420,7 +420,7 @@ int main(int argc, char** argv) {
     std::vector<size_t> req_map;
     for (size_t i = 0; i < pendings.size(); ++i)
       if (!pendings[i].llm_done) req_map.push_back(i);
-    std::fprintf(stderr, "[llm] 答题批量 %zu 题（并发 %d）...\n", reqs.size(),
+    std::fprintf(stderr, "[llm] answering batch of %zu questions (concurrency %d)...\n", reqs.size(),
                  cli.cfg.concurrency);
     auto resps = client->chat_batch(reqs, cli.cfg.concurrency);
     for (size_t k = 0; k < req_map.size(); ++k) {
@@ -463,7 +463,7 @@ int main(int argc, char** argv) {
            {0.0, 512, false}});  // 推理模型：max_tokens 含思考预算
       jidx.push_back(i);
     }
-    std::fprintf(stderr, "[llm] 判分批量 %zu 题...\n", judge_reqs.size());
+    std::fprintf(stderr, "[llm] judging batch of %zu questions...\n", judge_reqs.size());
     auto jresps = client->chat_batch(judge_reqs, cli.cfg.concurrency);
     for (size_t k = 0; k < jidx.size(); ++k)
       judge_scores[jidx[k]] = LlmJudge::parse_yes_no(jresps[k]) ? 1.0 : 0.0;
@@ -517,12 +517,12 @@ int main(int argc, char** argv) {
         std::fputc('\n', df);
       }
       std::fclose(df);
-      std::fprintf(stderr, "[dump] %s (%zu 题)\n", cli.dump_path.c_str(), pendings.size());
+      std::fprintf(stderr, "[dump] %s (%zu questions)\n", cli.dump_path.c_str(), pendings.size());
     }
   }
 
   // 步骤6：报表输出（控制台 + 可选 JSON）
-  std::printf("\n== %s 报表（extractor=%s answer=%s judge=%s k=%d）==\n", cli.dataset.c_str(),
+  std::printf("\n== %s report (extractor=%s answer=%s judge=%s k=%d) ==\n", cli.dataset.c_str(),
               cli.cfg.extractor_mode.c_str(), cli.cfg.answer_mode.c_str(),
               cli.cfg.judge_mode.c_str(), cli.cfg.k);
   std::printf("%s", acc.report().c_str());

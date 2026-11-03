@@ -73,4 +73,4 @@ lex_words = {e["word"] for e in entries}
 cov = vocab & lex_words
 print(f"vocab={len(vocab)} covered={len(cov)} coverage={len(cov)/len(vocab):.1%}")
 missing = sorted(vocab - lex_words, key=lambda w: -dict(v["conv_vocab_top"]).get(w, 0))[:20]
-print("未覆盖高频词样例:", missing)
+print("Uncovered frequent-word samples:", missing)

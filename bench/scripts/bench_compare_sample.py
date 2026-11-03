@@ -101,10 +101,10 @@ def main():
     args = ap.parse_args()
 
     if not EXE.exists():
-        sys.exit(f"缺少 {EXE}，先 cmake --build build-win")
+        sys.exit(f"Missing {EXE}; run cmake --build build-win first")
     use_llm = args.llm and have_llm_key()
     if args.llm and not use_llm:
-        print("[warn] 无 API key（config/env），退化为只比召回覆盖率（judge=N/A）")
+        print("[warn] No API key in config/env; comparing recall coverage only (judge=N/A)")
 
     configs = [c for c in CONFIGS if not args.quick or c[0] == "locomo_sample50"]
     results = {}   # (store, name) -> {elapsed, rows, rc}
@@ -115,12 +115,12 @@ def main():
             logdir.mkdir(parents=True, exist_ok=True)
             r = run_one(store, name, dataset, data, qids, use_llm, logdir)
             if r is None:
-                print(f"[skip] {name}: 数据缺失 {data}")
+                print(f"[skip] {name}: missing data {data}")
                 continue
             elapsed, dump, out, rc = r
             results[(store, name)] = {"elapsed": elapsed, "rows": load_dump(dump), "rc": rc}
             print(f"[run] {store:5s} {name:18s} rc={rc} {elapsed:.1f}s "
-                  f"({len(results[(store, name)]['rows'])} 题)")
+                  f"({len(results[(store, name)]['rows'])} questions)")
 
     # ---- 逐题对照表 + 汇总 ----
     lines = []
@@ -172,7 +172,7 @@ def main():
     table_name = "compare_table_llm.md" if use_llm else "compare_table.md"
     (OUT / table_name).write_text(report, encoding="utf-8")
     print("\n" + report)
-    print(f"\n[done] 对照表落盘 {OUT/table_name}")
+    print(f"\n[done] Comparison table written to {OUT/table_name}")
 
 
 if __name__ == "__main__":

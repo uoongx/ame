@@ -224,10 +224,10 @@ JNIEXPORT jlong JNICALL Java_com_ame_memory_AmeEngine_nativeCreateSession(JNIEnv
       if (e->load(sp) != ame::Err::Ok)
         LOGE("snapshot load failed: %s", sp.c_str());
       else
-        LOGI("createSession: 加载快照 %s（turns=%ld nodes=%ld）", sp.c_str(),
+        LOGI("createSession: loaded snapshot %s (turns=%ld nodes=%ld)", sp.c_str(),
              e->stats().turns, e->stats().nodes);
     } else {
-      LOGI("createSession: 无快照，全新记忆 %s", d.c_str());
+      LOGI("createSession: no snapshot, starting fresh memory %s", d.c_str());
     }
   }
   std::lock_guard<std::mutex> lk(ame_jni::g_mu());
@@ -251,7 +251,7 @@ JNIEXPORT void JNICALL Java_com_ame_memory_AmeEngine_nativeDestroySession(JNIEnv
   }
   std::string d = ame_jni::j2s(env, dir);
   if (!d.empty()) e->save(snapshot_path(d));
-  LOGI("destroySession: 快照兜底落盘 %s（turns=%ld）", d.c_str(), e->stats().turns);
+  LOGI("destroySession: final snapshot save %s (turns=%ld)", d.c_str(), e->stats().turns);
 }
 
 // nativeRememberTurn 伪代码：透传 Engine::remember_turn（speaker/text/ts/diaId/sessionId），
@@ -265,8 +265,7 @@ JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeRememberTurn(
   auto r = e->remember_turn(ame_jni::j2s(env, speaker), t, (ame::TimePoint)ts,
                             ame_jni::j2s(env, dia_id), ame_jni::j2s(env, session_id));
   if (r.code != ame::Err::Ok)
-    LOGE("rememberTurn(%s) 失败 code=%d: %.120s", ame_jni::j2s(env, speaker).c_str(),
-         (int)r.code, t.c_str());
+    LOGE("rememberTurn failed code=%d text_bytes=%zu", (int)r.code, t.size());
   return (jint)r.code;
 }
 
@@ -290,7 +289,7 @@ JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeLoadCheapModel(
       m.ok = !m.features.empty() && m.features.size() == m.weights.size();
     }
   }
-  LOGI("loadCheapModel: %s（%zu 特征）", m.ok ? "已启用" : "解析失败，回退引擎原序",
+  LOGI("loadCheapModel: %s (%zu features)", m.ok ? "enabled" : "parse failed, falling back to engine order",
        m.features.size());
   int rc = m.ok ? 1 : 0;
   std::lock_guard<std::mutex> lk(ame_jni::g_mu());
@@ -308,7 +307,7 @@ JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeLoadKeywordDict(
   if (!e) return -1;
   int n = e->extractor().load_keyword_dict_cached(ame_jni::j2s(env, dict), "", 10000000,
                                                   ame_jni::j2s(env, cache));
-  LOGI("loadKeywordDict: %d 条", n);
+  LOGI("loadKeywordDict: %d entries", n);
   return (jint)n;
 }
 
@@ -339,7 +338,7 @@ JNIEXPORT jstring JNICALL Java_com_ame_memory_AmeEngine_nativeRecall(JNIEnv* env
     cheap_rerank(cm, sq.text, rr.events);
     if (rr.events.size() > (size_t)limit) rr.events.resize((size_t)limit);
   }
-  LOGD("nativeRecall: '%.60s' -> %zu 条（cheap=%d 池=%d）", sq.text.c_str(), rr.events.size(),
+  LOGD("nativeRecall: query_bytes=%zu -> %zu results (cheap=%d pool=%d)", sq.text.size(), rr.events.size(),
        cheap ? 1 : 0, pool);
   std::string out = "[";
   bool first = true;

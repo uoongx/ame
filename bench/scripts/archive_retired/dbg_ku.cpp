@@ -19,7 +19,7 @@ int main() {
       for (auto& [ed, nb] : e.storage().neighbors(n->uid, {RelType::SUPERSEDES}))
         ++supersede_edges;
     }
-    printf("SUPERSEDES 边数=%d valid_to 标记事件数=%d\n", supersede_edges, marked);
+    printf("SUPERSEDES edges=%d events with valid_to=%d\n", supersede_edges, marked);
   }
   return 0;
 }

@@ -174,10 +174,10 @@ std::vector<Extraction> LlmExtractor::extract_session(
       }
     }
     if (arr.arr.size() != turns.size())
-      AME_LOGW("LlmExtractor: 数组长度 ", arr.arr.size(), " 与轮数 ", turns.size(),
-               " 不符，缺失轮回退规则提取");
+      AME_LOGW("LlmExtractor: array length ", arr.arr.size(), " differs from turn count ", turns.size(),
+               "; missing turns fall back to rule-based extraction");
   } else {
-    AME_LOGW("LlmExtractor: 解析失败，整会话回退规则提取器");
+    AME_LOGW("LlmExtractor: parse failed, falling back to rule-based extraction for the whole conversation");
     for (size_t i = 0; i < turns.size(); ++i) {
       out[i] = fallback_->extract(turns[i].second);
       out[i].event.text = turns[i].second;
@@ -367,7 +367,7 @@ std::vector<double> LlmJudge::judge(const std::string& question, const std::stri
       scores[i] = v >= 0.75 ? 1.0 : (v >= 0.25 ? 0.5 : 0.0);
     }
   } else {
-    AME_LOGW("LlmJudge: nugget 解析失败，按 0 兜底");
+    AME_LOGW("LlmJudge: nugget parse failed, falling back to score 0");
   }
   return scores;
 }

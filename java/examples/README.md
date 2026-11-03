@@ -3,7 +3,7 @@
 这两个示例面向 Linux x86_64，只依赖 Java 17+ 和 `ame-java-3.0.0-rc.2-linux-x86_64.jar`，无需 Spring、JSON 库或模型服务。示例全部使用合成中文数据，请使用专用演示目录。
 
 - `SdkQuickStart.java`：写入两条消息，召回、查看统计、保存，然后关闭并重新打开同一目录。
-- `PluggableAgentExample.java`：用应用自己的 `ContextProvider` 选择 legacy 或 AME。默认 legacy；模型回调通过日志记录输入并返回固定文本，没有调用真实 LLM，也不会解释召回 JSON。
+- `PluggableAgentExample.java`：用应用自己的 `ContextProvider` 选择 legacy 或 AME。默认 legacy；模型回调记录输入消息的角色和长度并返回固定文本，没有调用真实 LLM，也不会解释召回 JSON。
 
 ## 编译与运行
 
@@ -47,7 +47,7 @@ native 无法加载时 QuickStart 明确失败；可插拔示例记录 WARNING �
 
 示例只捕获预期的 SDK `UncheckedIOException`、`IllegalStateException`，以及初始化时明确的 `UnsatisfiedLinkError`；没有捕获通用 `Exception`、`Error` 或 `Throwable` 来隐藏程序错误。模型抛出的异常继续传播。两条追加和一次 `save()` 不是事务；失败后可能部分写入，因此没有自动重试或幂等承诺。
 
-示例使用 JDK 自带的 `java.util.logging`，正常过程为 INFO、降级告警为 WARNING，可通过 `-Djava.util.logging.config.file=/path/to/logging.properties` 调整日志输出。完整提示词日志仅用于查看这些合成数据如何流转；接入真实业务时移除这段日志。异常边界只记录阶段与异常类型，不输出可能含业务数据的异常消息。关闭日志不会跳过模型回调、记忆写入或保存。Java 17 控制台如出现乱码，可在主类前加 `-Dfile.encoding=UTF-8` 并使用 UTF-8 终端。
+示例使用 JDK 自带的 `java.util.logging`，正常过程为 INFO、降级告警为 WARNING，可通过 `-Djava.util.logging.config.file=/path/to/logging.properties` 调整日志输出。固定日志文案为英文，只记录模式、目录、ASCII 角色、调用次数与文本/JSON 长度，不打印提示词、回答或召回 JSON 的内容；`chars` 和 `jsonChars` 均为 Java 字符串的 UTF-16 代码单元数。中文合成数据仍参与模型回调、记忆读写和持久化。异常边界只记录阶段与异常类型，不输出可能含业务数据的异常消息。关闭日志不会跳过模型回调、记忆写入或保存。Java 17 控制台如出现路径乱码，可在主类前加 `-Dfile.encoding=UTF-8` 并使用 UTF-8 终端。
 
 为了保持无 JSON 依赖，示例把 `recall(..., 3)` 返回的完整 JSON 作为低信任 user 消息加入原 prompt，不改系统消息。附加消息超过 4,000 个 Unicode 码点时整体跳过，绝不截断 JSON 字符串。这是字符预算，不是 token 预算。生产应用通常用自己的 JSON 库提取条目的 `text`，按模型的 token 预算选择完整记录；历史文字始终是资料，不应提升为系统指令。将历史标记为低信任不能独自保证抵抗提示注入。
 
@@ -55,9 +55,9 @@ native 无法加载时 QuickStart 明确失败；可插拔示例记录 WARNING �
 
 ## 最小自查
 
-1. 默认 legacy：两次本地模型回调，最后输出模型调用次数 `2`，没有 AME 打开日志。
-2. 可用 native 下的 QuickStart：写入结果、召回数组、统计对象均为原样 JSON；关闭重开后仍可召回中文和 emoji。`turns/events` 是当前图的事件数，`total_chars` 是所有事件文本的 UTF-8 字节数；它们从已恢复的图计算，正常保存重开后应保持一致。
-3. 可用 native 下的 AME 模式：输出哈希目录，第二次模型输入可包含第一次成功回合的历史 JSON；随后保存并关闭。
+1. 默认 legacy：两次 `Local model callback` 日志，最后输出 `Model call count: 2`，没有 AME 打开日志。
+2. 可用 native 下的 QuickStart：日志显示两次写入结果、召回与统计 JSON 的长度；SDK 仍返回完整 JSON，关闭重开后仍可召回中文和 emoji，可通过 SDK 返回值或保存的快照检查内容。`turns/events` 是当前图的事件数，`total_chars` 是所有事件文本的 UTF-8 字节数；它们从已恢复的图计算，正常保存重开后应保持一致。
+3. 可用 native 下的 AME 模式：输出哈希目录与输入消息的角色、长度，第二次模型输入可包含第一次成功回合的历史 JSON，日志不展示其内容；随后保存并关闭。
 4. 给 AME 模式指定一个不存在的 `ame.native.path`：应出现 WARNING 级别的 `[open]` 日志、两次模型调用，且使用原始 prompt。相同设置下 legacy 仍可运行，因为它不加载 native。
 
 重复使用同一演示目录会继续追加消息；本例不自动删除目录、不去重、不执行真实模型质量评测或性能测试。更多接口字段和集成策略见 [API 参考](../docs/API.md) 与 [集成指南](../docs/INTEGRATION.md)。

@@ -102,11 +102,11 @@ def main():
     labels = crt.load_labels([a.log])
     # 拟合监督只用"被 LLM 看见过"的题（标签覆盖），覆盖率验收仍全 48 题
     fit_qids = sorted(q for q in pools if q in labels)
-    print(f"[fit] 题数 {len(pools)}（有标签 {len(fit_qids)}）")
+    print(f"[fit] questions {len(pools)} (labeled {len(fit_qids)})")
 
     # 先验版重放（与引擎端到端一致性校验）
     c0, ah0, n0 = topk_cov(pools, PRIOR)
-    print(f"[replay] 先验权重 {PRIOR} → 覆盖率 {c0:.3f} any-hit {ah0}/{n0}")
+    print(f"[replay] prior weights {PRIOR} -> coverage {c0:.3f} any-hit {ah0}/{n0}")
 
     # GroupKFold（5-fold，题级）坐标下降：每折独立拟合 → held-out AUC（过拟合检查）
     folds = [set(fit_qids[i::5]) for i in range(5)]
@@ -119,24 +119,24 @@ def main():
         cv_aucs.append(mean_auc(pools, w, sorted(te)))
         print(f"[fold{fi}] train_auc={tr_auc:.3f} heldout_auc={cv_aucs[-1]:.3f} w={['%.2f' % x for x in w]}")
     print(f"[cv] train {sum(tr_aucs)/5:.3f} / held-out {sum(cv_aucs)/5:.3f}"
-          f"（差距 {sum(tr_aucs)/5 - sum(cv_aucs)/5:+.3f} = 过拟合面）")
+          f" (gap {sum(tr_aucs)/5 - sum(cv_aucs)/5:+.3f} = overfitting gap)")
 
     # 全量拟合（交付权重）：全部有标签题上拟合
     w_full, full_auc = coordinate_descent(pools, fit_qids, PRIOR)
     c1, ah1, _ = topk_cov(pools, w_full)
-    print(f"[fit-all] train_auc={full_auc:.3f} 拟合权重 w={['%.3f' % x for x in w_full]}")
-    print(f"[replay] 拟合权重 → 覆盖率 {c1:.3f} any-hit {ah1}/{n0}（先验 {c0:.3f}）")
+    print(f"[fit-all] train_auc={full_auc:.3f} fitted weights w={['%.3f' % x for x in w_full]}")
+    print(f"[replay] fitted weights -> coverage {c1:.3f} any-hit {ah1}/{n0} (prior {c0:.3f})")
 
     # 七关系消融（拟合权重上，关一个特征看重放 Δ）
-    print("[abl] 特征消融（拟合权重，置 0 一个特征）：")
+    print("[abl] feature ablation (fitted weights, one feature set to zero):")
     for j, name in enumerate(FEATS):
         w2 = list(w_full)
         w2[j] = 0.0
         c2, _, _ = topk_cov(pools, w2)
-        print(f"  -{name:<9} 覆盖率 {c2:.3f}（Δ {c2 - c1:+.3f}）")
+        print(f"  -{name:<9} coverage {c2:.3f} (delta {c2 - c1:+.3f})")
 
     # 拟合权重 vs 先验的差距解读数据
-    print("[gap] 拟合-先验 权重差：" + ", ".join(f"{n}:{f - p:+.2f}" for n, f, p in zip(FEATS, w_full, PRIOR)))
+    print("[gap] fitted-minus-prior weight differences: " + ", ".join(f"{n}:{f - p:+.2f}" for n, f, p in zip(FEATS, w_full, PRIOR)))
     out = {"prior": PRIOR, "fitted": w_full, "cv_heldout_auc": sum(cv_aucs) / 5,
            "fold_ws": fold_ws,
            "replay": {"prior_cov": c0, "fitted_cov": c1, "fitted_any_hit": ah1, "n": n0}}
