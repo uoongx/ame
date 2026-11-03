@@ -254,6 +254,6 @@ java -Dame.native.path=/absolute/path/libame_jni.so -jar your-agent.jar
 
 该属性须在首次 `open()` 前设置；同一类加载器生命周期只加载一次库，之后改属性不会切换已加载的库。JNI 导出符号随 Java 类名迁移，因此外置 SO 也须替换为同次构建产物；ABI 编号仍为 1 不表示可以复用 `io.ame` 旧库。SDK 不从自定义环境变量或 HTTP 配置读取此值，也不自动下载缺失的库。
 
-当前交付文件为 `build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar` 及同目录配套 `.pom`，使用上述标准 Maven 坐标引用，不带 classifier。构建入口仍是 `sh .cloudbuild/build.sh`，只打包本地产物，不自动 `install` 或 `deploy`；诊断归档和校验步骤见 [SDK README](../README.md)。Linux 运行时还必须满足实际 SO 的 glibc 要求；构建默认不设置版本上限，仅在显式配置 `AME_MAX_GLIBC` 时检查。实际要求以本次归档 `metadata/build.json` 的 `required_glibc` 及测试日志为准，[Linux 验证记录](LINUX-VALIDATION.md) 保留其记录的历史坐标、Java 包与产物证据。版本号和 Java 字节码目标都不能替代目标系统验证。
+当前交付文件为 `build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar` 及同目录的 `convai-ame-java.pom`，使用上述标准 Maven 坐标引用，不带 classifier。固定的只是交付 POM 文件名，其内部 GAV、版本及 Maven 仓库的标准带版本布局不变。构建入口仍是 `sh .cloudbuild/build.sh`，只打包本地产物，不自动 `install` 或 `deploy`；诊断归档和校验步骤见 [SDK README](../README.md)。Linux 运行时还必须满足实际 SO 的 glibc 要求；构建默认不设置版本上限，仅在显式配置 `AME_MAX_GLIBC` 时检查。实际要求以本次归档 `metadata/build.json` 的 `required_glibc` 及测试日志为准，[Linux 验证记录](LINUX-VALIDATION.md) 保留其记录的历史坐标、Java 包与产物证据。版本号和 Java 字节码目标都不能替代目标系统验证。
 
 本文以现有六方法 API 为边界。C++ 内部的注册实体、精确查询、时间过滤、修改权重等能力没有因此自动成为 Java 公共接口；应用适配层的 provider、用户缓存和失败回退也不是 SDK 内置配置项。

@@ -54,7 +54,7 @@ sh .cloudbuild/build.sh
 3. 在隔离目录复制 Java 源码，排除源码资源中的旧 DLL/SO/dylib。坐标和版本取自 `java/pom.xml`，通过 Maven 将本次 SO 打进不带 classifier 的标准主 JAR。
 4. 检查 JAR 中唯一 native 库为 `com/huawei/convai/ame/native/linux-x86_64/libame_jni.so`，且与本次构建 SO 逐字节一致；要求新包下的 `AmeEngine.class` 和 `NativeLibraryLoader.class` 存在，拒绝任何 `io/ame/` 遗留条目。同时核对新坐标下的内嵌 POM 原文和 `pom.properties` 的 groupId、artifactId、version。
 5. 显式运行 `NativeLibraryLoaderTest`、`AmeEngineSmokeTest`、`AmeEngineBoundaryTest`，分别验证平台拒绝策略、真实 JNI 与持久化边界。它们是 Java main，不能把 Maven 的 `Tests run: 0` 当作 JNI 验证。测试 classpath 仅包含测试类和最终 JAR；移除测试子进程的 JVM 注入变量，确保使用 JAR 内 native 资源。
-6. 全部通过才输出独立 JAR、配套 POM、诊断归档和校验文件。归档包含同名 JAR/POM、SO、工具链、ELF、三个测试日志及构建状态，不包含测试记忆数据或 Maven 缓存。
+6. 全部通过才输出独立 JAR、配套 POM、诊断归档和校验文件。归档保留与顶层产物一致的 JAR/POM 文件名，并包含 SO、工具链、ELF、三个测试日志及构建状态，不包含测试记忆数据或 Maven 缓存。
 
 同一 checkout 通过文件锁禁止并行构建；并行任务使用各自的工作区。失败重试会先清理制品输出，防止上传旧成功产物；历史 run 的日志和临时构建树保留。流水线负责其工作区的常规回收。脚本不递归删除工作区，也不覆盖 `java/dist/` 中的历史交付物。
 
@@ -64,25 +64,25 @@ sh .cloudbuild/build.sh
 
 ```text
 build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar
-build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.pom
+build/cloudbuild/artifacts/convai-ame-java.pom
 build/cloudbuild/artifacts/convai-ame-java-linux-x86_64.tar.gz
 build/cloudbuild/artifacts/SHA256SUMS
 ```
 
-外部 `SHA256SUMS` 覆盖 JAR、POM 和诊断归档。若公司 `hwcloud_artifact` 当前任务使用“全路径 Perl 正则、每项只匹配一个文件”的约定，可配置以下四项；需在实际任务确认插件语义，版本更新时同步 JAR/POM 的匹配规则：
+外部 `SHA256SUMS` 覆盖 JAR、POM 和诊断归档。若公司 `hwcloud_artifact` 当前任务使用“全路径 Perl 正则、每项只匹配一个文件”的约定，可配置以下四项；需在实际任务确认插件语义，版本更新时同步 JAR 的匹配规则，POM 使用固定文件名规则：
 
 ```text
 .*/build/cloudbuild/artifacts/convai-ame-java-3\.0\.0-rc\.2\.jar$
-.*/build/cloudbuild/artifacts/convai-ame-java-3\.0\.0-rc\.2\.pom$
+.*/build/cloudbuild/artifacts/convai-ame-java\.pom$
 .*/build/cloudbuild/artifacts/convai-ame-java-linux-x86_64\.tar\.gz$
 .*/build/cloudbuild/artifacts/SHA256SUMS$
 ```
 
-固定诊断归档名方便平台收集；压缩包内部文件保留 POM 版本，SO 和元数据目录结构不变：
+固定诊断归档名方便平台收集；压缩包内 JAR 名含版本，交付 POM 名固定为 `convai-ame-java.pom`，SO 和元数据目录结构不变：
 
 ```text
 convai-ame-java-<version>.jar
-convai-ame-java-<version>.pom
+convai-ame-java.pom
 libame_jni.so
 metadata/build.json
 metadata/toolchain.txt
@@ -93,6 +93,8 @@ metadata/AmeEngineSmokeTest.log
 metadata/AmeEngineBoundaryTest.log
 SHA256SUMS
 ```
+
+固定的只是顶层产物和诊断归档中的交付 POM 文件名；POM 内部 GAV/version 不变。Maven 安装后仍按标准带版本布局保存，例如仓库根目录下的 `com/huawei/convai/convai-ame-java/3.0.0-rc.2/convai-ame-java-3.0.0-rc.2.pom`。
 
 `metadata/build.json` 包含以下制品标识；`platform` 字段标明 Linux 限定，不使用 Maven classifier 表达平台：
 
@@ -130,7 +132,7 @@ tar -xzf convai-ame-java-linux-x86_64.tar.gz -C sdk
 ```sh
 mvn install:install-file \
   -Dfile=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar \
-  -DpomFile=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.pom
+  -DpomFile=build/cloudbuild/artifacts/convai-ame-java.pom
 ```
 
 Linux Agent 引用：

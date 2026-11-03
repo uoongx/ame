@@ -18,7 +18,7 @@
 
 AME 提供记忆写入和检索证据，应用继续负责用户鉴权、当前上下文、业务规则、模型调用及回答输出。当前 Java API 使用内置规则提取和默认向量实现，没有 embedding/提取器注入、模型调用或远程存储配置入口。
 
-从仓库根目录执行 `sh .cloudbuild/build.sh`，在 `build/cloudbuild/artifacts/` 得到 `convai-ame-java-3.0.0-rc.2.jar`、配套 `.pom`、`convai-ame-java-linux-x86_64.tar.gz` 诊断归档和 `SHA256SUMS`。独立 JAR/POM 可直接交给平台制品发布步骤，无需先解包；构建脚本只生成本地产物，不自动 `install` 或 `deploy`。完整构建、解包与校验命令见 [SDK README](../README.md)。
+从仓库根目录执行 `sh .cloudbuild/build.sh`，在 `build/cloudbuild/artifacts/` 得到 `convai-ame-java-3.0.0-rc.2.jar`、`convai-ame-java.pom`、`convai-ame-java-linux-x86_64.tar.gz` 诊断归档和 `SHA256SUMS`。独立 JAR/POM 可直接交给平台制品发布步骤，无需先解包；构建脚本只生成本地产物，不自动 `install` 或 `deploy`。固定的只是交付 POM 文件名，其内部 GAV 和版本不变，JAR 文件名仍带版本。完整构建、解包与校验命令见 [SDK README](../README.md)。
 
 Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源路径同步迁移；调用方须把 import 改为 `com.huawei.convai.ame.AmeEngine`，并更新反射类名或示例启动类后重新编译。Maven GAV 和无 classifier 的构件形式不变，Linux 平台限制、JNI ABI 1 与 `ame.native.path` 属性也不变。若使用外置 SO，应替换为同次构建的 SO；新 JAR 不应混用旧 Java 包对应的 JNI 库。
 
@@ -49,10 +49,10 @@ dependencies {
 ```sh
 mvn install:install-file \
   -Dfile=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar \
-  -DpomFile=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.pom
+  -DpomFile=build/cloudbuild/artifacts/convai-ame-java.pom
 ```
 
-本地安装只影响当前机器，CI/其他 Agent 仍需拿到同一构件。平台发布应使用配套 POM 中的新坐标，不添加 classifier，并记录 JAR SHA256 与验证结果；历史 `io.ame:ame-java` 构件保持原样。本次迁包保留上述 GAV，需核对实际 JAR 的校验值和类路径，避免沿用包含旧 Java 包的缓存。
+固定交付名不改变 Maven 仓库的标准布局：安装后的 POM 仍为版本目录下的 `convai-ame-java-3.0.0-rc.2.pom`。本地安装只影响当前机器，CI/其他 Agent 仍需拿到同一构件。平台发布应使用配套 POM 中的新坐标，不添加 classifier，并记录 JAR SHA256 与验证结果；历史 `io.ame:ame-java` 构件保持原样。本次迁包保留上述 GAV，需核对实际 JAR 的校验值和类路径，避免沿用包含旧 Java 包的缓存。
 
 首次 `open` 先校验当前 JVM 为 Linux x86_64，再从 JAR 提取 SO 到 `java.io.tmpdir`。需要外置库时，在首次 `open` 前指定 JVM 属性：
 

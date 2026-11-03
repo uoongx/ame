@@ -31,7 +31,8 @@ def publication_fixtures():
         BUILD.LEGACY_BUNDLE: b"legacy successful build",
         "SHA256SUMS": b"previous checksum",
         "convai-ame-java-3.0.0-rc.2.jar": b"current JAR",
-        "convai-ame-java-3.0.0-rc.2.pom": b"current POM",
+        "convai-ame-java.pom": b"current POM",
+        "convai-ame-java-3.0.0-rc.2.pom": b"previous versioned POM",
         "convai-ame-java-2.0.0.jar": b"older JAR",
         "convai-ame-java-2.0.0.pom": b"older POM",
     }
@@ -221,7 +222,7 @@ class MavenPackagingTest(unittest.TestCase):
         for name in BUILD.TOOL_LOGS + BUILD.SDK_TESTS:
             (self.build.logs / (name + ".log")).write_text("test log fixture\n", encoding="utf-8")
         return self.build.prepare_package(
-            self.jar, self.library, self.source_pom, self.native, self.version)
+            self.jar, self.library, self.source_pom, self.native)
 
     def assert_checksums(self, files):
         lines = files["SHA256SUMS"].decode("utf-8").splitlines()
@@ -236,7 +237,7 @@ class MavenPackagingTest(unittest.TestCase):
         package = self.prepare_package()
         self.build.publish(package)
         files = {path.name: path.read_bytes() for path in self.artifacts.iterdir()}
-        jar_name, pom_name = self.stem + ".jar", self.stem + ".pom"
+        jar_name, pom_name = self.stem + ".jar", "convai-ame-java.pom"
         self.assertEqual(set(files), {jar_name, pom_name, "convai-ame-java-linux-x86_64.tar.gz", "SHA256SUMS"})
         self.assertEqual(files[jar_name], self.jar.read_bytes())
         self.assertEqual(files[pom_name], self.source_pom.read_bytes())

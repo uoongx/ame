@@ -16,12 +16,12 @@ sh .cloudbuild/build.sh
 
 ```text
 build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar
-build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.pom
+build/cloudbuild/artifacts/convai-ame-java.pom
 build/cloudbuild/artifacts/convai-ame-java-linux-x86_64.tar.gz
 build/cloudbuild/artifacts/SHA256SUMS
 ```
 
-独立 JAR/POM 可直接作为公司平台制品发布步骤的输入，无需先解包；外部 `SHA256SUMS` 覆盖 JAR、POM 和诊断归档。归档保留同名 JAR/POM、`libame_jni.so`、构建与测试元数据及内部 `SHA256SUMS`。坐标与版本取自 POM，固定归档名便于流水线收集。构建仅打包，不自动执行 Maven `install` 或 `deploy`，也不新增远端发布配置。
+独立 JAR/POM 可直接作为公司平台制品发布步骤的输入，无需先解包；外部 `SHA256SUMS` 覆盖 JAR、POM 和诊断归档。归档保留与顶层产物一致的 JAR/POM 文件名、`libame_jni.so`、构建与测试元数据及内部 `SHA256SUMS`。交付 POM 固定命名为 `convai-ame-java.pom`，JAR 仍为 `convai-ame-java-<version>.jar`；POM 内部 GAV 和版本不变，坐标与版本仍取自 POM。构建仅打包，不自动执行 Maven `install` 或 `deploy`，也不新增远端发布配置。
 
 归档内 `metadata/build.json` 记录 `group_id: "com.huawei.convai"`、`artifact_id: "convai-ame-java"`、`version: "3.0.0-rc.2"`、`java_package: "com.huawei.convai.ame"`、`classifier: null` 和 `platform: "linux-x86_64"`。`java_package` 区分同 GAV 下迁包前后的产物；无 classifier 不表示支持其他操作系统或 CPU 架构。
 
@@ -64,8 +64,10 @@ java -Dame.native.path=/absolute/path/libame_jni.so -jar your-agent.jar
 ```sh
 mvn install:install-file \
   -Dfile=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar \
-  -DpomFile=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.pom
+  -DpomFile=build/cloudbuild/artifacts/convai-ame-java.pom
 ```
+
+固定名称仅用于交付文件，不改变 Maven 仓库布局。安装后 POM 仍位于仓库根目录下的 `com/huawei/convai/convai-ame-java/3.0.0-rc.2/convai-ame-java-3.0.0-rc.2.pom`。
 
 应用声明：
 

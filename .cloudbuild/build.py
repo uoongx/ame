@@ -25,6 +25,7 @@ OUTPUT = ROOT / "build" / "cloudbuild"
 PLATFORM = "linux-x86_64"
 GROUP_ID = "com.huawei.convai"
 ARTIFACT_ID = "convai-ame-java"
+POM_FILE = ARTIFACT_ID + ".pom"
 BUNDLE = ARTIFACT_ID + "-" + PLATFORM + ".tar.gz"
 LEGACY_BUNDLE = "ame-java-linux-x86_64.tar.gz"
 JAVA_PACKAGE = "com.huawei.convai.ame"
@@ -53,7 +54,7 @@ def write_json(path, value):
 
 def clear_artifacts(directory):
     # Remove only pipeline-owned outputs, including the previous bundle name.
-    paths = {directory / name for name in (BUNDLE, LEGACY_BUNDLE, "SHA256SUMS")}
+    paths = {directory / name for name in (BUNDLE, LEGACY_BUNDLE, POM_FILE, "SHA256SUMS")}
     for suffix in (".jar", ".pom"):
         paths.update(directory.glob(ARTIFACT_ID + "-*" + suffix))
     for path in sorted(paths):
@@ -141,7 +142,7 @@ class Build:
         library = native / "native-build/libame_jni.so"
         self.verify_jar(jar, library, source_pom)
         self.run_sdk_tests(sdk, jar)
-        package = self.prepare_package(jar, library, source_pom, native, version)
+        package = self.prepare_package(jar, library, source_pom, native)
         self.publish(package)
 
     def preflight(self):
@@ -280,13 +281,13 @@ class Build:
                                 JAVA_PACKAGE + "." + test] + ([] if test == "NativeLibraryLoaderTest" else
                                 [self.run / "test-data" / test]), env=test_env)
 
-    def prepare_package(self, jar, library, source_pom, native, version):
+    def prepare_package(self, jar, library, source_pom, native):
         self.status["step"] = "package-artifacts"
         package = self.run / "package"
         metadata = package / "metadata"
         metadata.mkdir(parents=True)
         shutil.copy2(str(jar), str(package / jar.name))
-        shutil.copy2(str(source_pom), str(package / (ARTIFACT_ID + "-" + version + ".pom")))
+        shutil.copy2(str(source_pom), str(package / POM_FILE))
         shutil.copy2(str(library), str(package / "libame_jni.so"))
         for name in NATIVE_METADATA:
             shutil.copy2(str(native / name), str(metadata / name))
@@ -309,8 +310,7 @@ class Build:
         # Publish only after all build, packaging and JNI checks succeed.
         os.replace(str(archive_path), str(self.artifacts / BUNDLE))
         files = [self.artifacts / BUNDLE]
-        for suffix in (".jar", ".pom"):
-            name = ARTIFACT_ID + "-" + self.status["version"] + suffix
+        for name in (ARTIFACT_ID + "-" + self.status["version"] + ".jar", POM_FILE):
             destination = self.artifacts / name
             shutil.copy2(str(package / name), str(destination))
             files.append(destination)
