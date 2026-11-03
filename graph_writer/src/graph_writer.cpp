@@ -114,77 +114,92 @@ std::string GraphWriter::get_or_create_place(const ExtractedPlace& p, bool* crea
 // 步骤6（NEXT 叙事链）：若存在上一条事件且非自身，写 上一事件->本事件
 //        的 NEXT 边，并把本事件记为新的链尾。
 // 步骤7：调 auto_grow 完成关键词共现结晶、实体共历、推导标签等生长，返回结果。
-WriteResult GraphWriter::write_event(
-    const Extraction& extraction,
-    const std::vector<std::pair<std::string, std::string>>& resolved_entities) {
-  WriteResult wr;
-  if (extraction.event.text.empty()) {
-    wr.code = Err::InvalidArg;
-    return wr;
-  }
-
-  // ---- Event 节点 ----
+Node GraphWriter::create_event(const Extraction& extraction) {
   Node ev;
   ev.uid = gen_uid();
   ev.kind = NodeKind::Event;
   ev.text = extraction.event.text;
-  ev.name = extraction.event.text.size() > 24 ? extraction.event.text.substr(0, 24) : extraction.event.text;
+  ev.name = extraction.event.text.substr(0, 24);
   ev.type = extraction.event.type;
   ev.ts = extraction.event.time > 0 ? extraction.event.time : TimeService::now_utc();
   ev.precision = extraction.event.precision;
   ev.importance = 0.5;
   ev.embedding = vec_.embed(extraction.event.text);
   storage_.put_node(ev);
-  wr.event_id = ev.uid;
+  return ev;
+}
 
-  // ---- 实体锚点 INVOLVES(role) ----
+std::vector<std::string> GraphWriter::link_entities(
+    const std::string& event_uid, const Extraction& extraction,
+    const std::vector<std::pair<std::string, std::string>>& resolved_entities, WriteResult& result) {
   std::vector<std::string> entity_uids;
   std::unordered_map<std::string, std::string> role_of;
-  for (auto& e : extraction.entities) role_of[e.surface] = e.role;
-  for (auto& [surface, uid] : resolved_entities) {
+  for (const auto& entity : extraction.entities) role_of[entity.surface] = entity.role;
+  for (const auto& [surface, uid] : resolved_entities) {
     if (uid.empty() || !storage_.get_node(uid)) continue;
     entity_uids.push_back(uid);
-    std::string role = "人物";
-    auto it = role_of.find(surface);
-    if (it != role_of.end()) role = it->second;
-    storage_.put_edge(Edge{ev.uid, uid, RelType::INVOLVES, 1.0, {{"role", role}}});
-    wr.resolved.emplace_back(surface, uid);
+    auto role = role_of.find(surface);
+    std::string value = role == role_of.end() ? "人物" : role->second;
+    storage_.put_edge(Edge{event_uid, uid, RelType::INVOLVES, 1.0, {{"role", value}}});
+    result.resolved.emplace_back(surface, uid);
   }
+  return entity_uids;
+}
 
-  // ---- 地点锚点 HAPPENED_AT ----
-  std::string place_uid;
-  if (!extraction.place.name.empty()) {
-    place_uid = get_or_create_place(extraction.place);
-    storage_.put_edge(Edge{ev.uid, place_uid, RelType::HAPPENED_AT, 1.0, {}});
+std::string GraphWriter::link_place(const std::string& event_uid, const ExtractedPlace& place) {
+  if (place.name.empty()) return "";
+  std::string uid = get_or_create_place(place);
+  storage_.put_edge(Edge{event_uid, uid, RelType::HAPPENED_AT, 1.0, {}});
+  return uid;
+}
+
+void GraphWriter::activate_keyword(const std::string& uid) {
+  Node* node = storage_.get_node_mut(uid);
+  if (!node) return;
+  if (node->status == 1) node->status = 0;
+  if (node->embedding.empty()) node->embedding = vec_.embed(node->name + " " + node->type);
+}
+
+std::vector<std::string> GraphWriter::link_keywords(
+    const std::string& event_uid, const std::vector<ExtractedKeyword>& keywords) {
+  std::vector<std::string> keyword_uids;
+  for (const auto& keyword : keywords) {
+    // Always resolve before deduplicating: get_or_create also counts mentions.
+    std::string uid = kw_.get_or_create(keyword.word, keyword.category);
+    if (uid.empty()) continue;
+    if (std::find(keyword_uids.begin(), keyword_uids.end(), uid) != keyword_uids.end()) continue;
+    keyword_uids.push_back(uid);
+    storage_.put_edge(Edge{event_uid, uid, RelType::CONTAINS, 1.0,
+                           {{"category", keyword.category}}});
+    activate_keyword(uid);
   }
+  return keyword_uids;
+}
 
-  // ---- 关键词锚点 CONTAINS（M3 归一 + 停用词过滤 + 休眠管理）----
-  std::vector<std::string> kw_uids;
-  for (auto& k : extraction.keywords) {
-    std::string kuid = kw_.get_or_create(k.word, k.category);
-    if (kuid.empty()) continue;  // 停用词
-    // 归一后去重：同事件两个词形归一到同一关键词时不重复建边（防自环共现边）
-    bool dup = false;
-    for (auto& u : kw_uids)
-      if (u == kuid) { dup = true; break; }
-    if (dup) continue;
-    kw_uids.push_back(kuid);
-    storage_.put_edge(Edge{ev.uid, kuid, RelType::CONTAINS, 1.0, {{"category", k.category}}});
-    // 有边连接 → 不满足"无边"休眠条件，唤醒
-    Node* kn = storage_.get_node_mut(kuid);
-    if (kn && kn->status == 1) kn->status = 0;
-    if (kn && kn->embedding.empty())
-      kn->embedding = vec_.embed(kn->name + " " + kn->type);
+void GraphWriter::link_next(const std::string& event_uid) {
+  if (!last_event_uid_.empty() && last_event_uid_ != event_uid)
+    storage_.put_edge(Edge{last_event_uid_, event_uid, RelType::NEXT, 1.0, {}});
+  last_event_uid_ = event_uid;
+}
+
+WriteResult GraphWriter::write_event(
+    const Extraction& extraction,
+    const std::vector<std::pair<std::string, std::string>>& resolved_entities) {
+  WriteResult result;
+  if (extraction.event.text.empty()) {
+    result.code = Err::InvalidArg;
+    return result;
   }
-
-  // ---- NEXT 叙事时间链 ----
-  if (!last_event_uid_.empty() && last_event_uid_ != ev.uid)
-    storage_.put_edge(Edge{last_event_uid_, ev.uid, RelType::NEXT, 1.0, {}});
-  last_event_uid_ = ev.uid;
-
-  auto_grow(ev, entity_uids, kw_uids, place_uid);
-  supersede_pass(ev, entity_uids, kw_uids);
-  return wr;
+  // Preserve write order: event, entities, place, keywords, NEXT, growth, supersession.
+  Node event = create_event(extraction);
+  result.event_id = event.uid;
+  auto entities = link_entities(event.uid, extraction, resolved_entities, result);
+  auto place = link_place(event.uid, extraction.place);
+  auto keywords = link_keywords(event.uid, extraction.keywords);
+  link_next(event.uid);
+  auto_grow(event, entities, keywords, place);
+  supersede_pass(event, entities, keywords);
+  return result;
 }
 
 // 知识更新传递（SUPERSEDES，设计文档"双时态/状态关系带有效期"的落地）：

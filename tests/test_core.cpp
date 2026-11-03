@@ -107,12 +107,71 @@ static void test_log_message() {
   CHECK(log_message("", 0, '/', static_cast<size_t>(10)) == "0/10");
 }
 
+static void test_json_escape_compatibility() {
+  bool ok = false;
+  const auto decoded = Json::parse(
+      R"("\n\t\r\"\\\/\u0000\u007f\u0080\u07FF\u0800\u4e2d")", &ok);
+  CHECK(ok);
+  std::string expected = "\n\t\r\"\\/";
+  expected.push_back('\0');
+  expected += "\x7f\xc2\x80\xdf\xbf\xe0\xa0\x80\xe4\xb8\xad";
+  CHECK(decoded.str == expected);
+  // This refactor preserves the legacy permissive decoder, including unknown
+  // escapes and non-hex digits. Strict JSON validation is a separate contract.
+  CHECK(Json::parse(R"("\q\u00g1")", &ok).str == std::string("q\x01", 2));
+  CHECK(ok);
+  for (const auto* invalid : {R"("\u12)", R"("unfinished)", R"("trailing\)"}) {
+    CHECK(Json::parse(invalid, &ok).is_null());
+    CHECK(!ok);
+  }
+}
+
+static std::string nested_json(size_t depth, bool mixed) {
+  std::string prefix, suffix;
+  for (size_t i = 0; i < depth; ++i) {
+    const bool object = mixed && i % 2 == 0;
+    prefix += object ? "{\"v\":" : "[";
+    suffix += object ? "}" : "]";
+  }
+  return prefix + "0" + std::string(suffix.rbegin(), suffix.rend());
+}
+
+static void test_json_depth_limit() {
+  bool ok = false;
+  for (bool mixed : {false, true}) {
+    const auto text = nested_json(Json::kMaxNestingDepth, mixed);
+    auto value = Json::parse(text, &ok);
+    CHECK(ok);
+    CHECK(value.dump() == text);
+    const auto too_deep = nested_json(Json::kMaxNestingDepth + 1, mixed);
+    CHECK(Json::parse(too_deep, &ok).is_null());
+    CHECK(!ok);
+    Json outer = Json::object();
+    outer["v"] = std::move(value);
+    bool rejected = false;
+    try { outer.dump(); } catch (const std::length_error&) { rejected = true; }
+    CHECK(rejected);
+  }
+  // Empty containers must consume depth too; no scalar leaf is required.
+  const auto limit = Json::kMaxNestingDepth;
+  const std::string empty_arrays = std::string(limit, '[') + std::string(limit, ']');
+  CHECK(Json::parse(empty_arrays, &ok).dump() == empty_arrays);
+  CHECK(ok);
+  CHECK(Json::parse("[" + empty_arrays + "]", &ok).is_null());
+  CHECK(!ok);
+  // Rejection happens before recursively traversing the entire input.
+  CHECK(Json::parse(nested_json(10000, true), &ok).is_null());
+  CHECK(!ok);
+}
+
 int main() {
   test_uid_uniqueness();
   test_conduction_coeff();
   test_rel_name_roundtrip();
   test_json_roundtrip();
   test_json_numbers_and_controls();
+  test_json_escape_compatibility();
+  test_json_depth_limit();
   test_log_message();
   return AME_TEST_REPORT();
 }

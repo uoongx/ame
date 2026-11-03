@@ -8,6 +8,7 @@
  * 依赖关系：仅依赖标准库；被需要 JSON 读写的模块（storage M9 快照、engine M12 接口等）使用。
  */
 #pragma once
+#include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
@@ -16,6 +17,9 @@ namespace ame {
 
 struct Json {
   enum Kind { Null, Bool, Num, Str, Arr, Obj } kind = Null;
+
+  // Maximum number of enclosing arrays/objects, shared by parse and dump.
+  static constexpr std::size_t kMaxNestingDepth = 128;
 
   bool b = false;
   double num = 0;
@@ -43,6 +47,8 @@ struct Json {
   std::string as_str(const std::string& def = "") const { return kind == Str ? str : def; }
   bool as_bool(bool def = false) const { return kind == Bool ? b : def; }
 
+  // dump throws std::length_error for deeper structures; parse returns Null
+  // and sets ok=false, using the same failure contract as malformed input.
   std::string dump() const;
   static Json parse(const std::string& s, bool* ok = nullptr);
 };

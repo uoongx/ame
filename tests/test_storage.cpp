@@ -2,7 +2,10 @@
  * M9 storage 单元测试：内存邻接表（出/入边）、按类型过滤、JSON 快照 save/load 往返一致
  */
 #include "ame/storage/storage.h"
+#include "ame/core/json.h"
 #include "test_util.hpp"
+
+#include <limits>
 
 using namespace ame;
 
@@ -64,8 +67,80 @@ static void test_upsert_and_geo() {
         geohash_encode(p2.lat, p2.lng, 6).substr(0, 4));
 }
 
+static Json snapshot_with_node(Json node) {
+  Json snapshot = Json::object();
+  snapshot["nodes"] = Json::array();
+  snapshot["nodes"].push(std::move(node));
+  return snapshot;
+}
+
+static void test_snapshot_defaults_and_numeric_boundaries() {
+  Storage storage;
+  Json node = Json::object();
+  node["uid"] = Json::string("node");
+  CHECK(storage.from_json(snapshot_with_node(node)) == Err::Ok);
+  const Node* restored = storage.get_node("node");
+  CHECK(restored && restored->kind == NodeKind::Event && restored->precision == Precision::Second);
+  CHECK(restored->importance == 0.5 && restored->status == 0 && restored->embedding.empty());
+  node["ts"] = Json::number(-std::ldexp(1.0, 63));
+  node["status"] = Json::number(static_cast<double>(std::numeric_limits<int>::max()) + 0.75);
+  node["mention_count"] = Json::number(-1.75);
+  node["precision"] = Json::string("wrong type");
+  node["importance"] = Json::string("wrong type");
+  node["embedding"] = Json::array();
+  node["embedding"].push(Json::number(std::numeric_limits<float>::max()));
+  CHECK(storage.from_json(snapshot_with_node(node)) == Err::Ok);
+  restored = storage.get_node("node");
+  CHECK(restored->ts == std::numeric_limits<TimePoint>::min());
+  CHECK(restored->status == std::numeric_limits<int>::max() && restored->mention_count == -1);
+  CHECK(restored->precision == Precision::Year && restored->importance == 0.5);
+  CHECK(restored->embedding.at(0) == std::numeric_limits<float>::max());
+  double highest_timestamp = std::nextafter(std::ldexp(1.0, 63), 0.0);
+  node["ts"] = Json::number(highest_timestamp);
+  CHECK(storage.from_json(snapshot_with_node(node)) == Err::Ok);
+  CHECK(storage.get_node("node")->ts == static_cast<TimePoint>(highest_timestamp));
+}
+
+static void test_invalid_snapshot_preserves_graph() {
+  Storage storage;
+  Node original, other;
+  original.uid = "original"; original.kind = NodeKind::Entity; original.name = "kept";
+  other.uid = "other";
+  storage.put_node(original); storage.put_node(other);
+  storage.put_edge(Edge{original.uid, other.uid, RelType::INVOLVES, 1.0, {}});
+  const std::vector<std::pair<std::string, double>> invalid = {
+      {"kind", std::ldexp(1.0, 31)},
+      {"precision", -std::ldexp(1.0, 31) - 1.0},
+      {"status", std::numeric_limits<double>::quiet_NaN()},
+      {"mention_count", std::numeric_limits<double>::infinity()},
+      {"ts", std::ldexp(1.0, 63)},
+      {"ts", std::nextafter(-std::ldexp(1.0, 63), -std::numeric_limits<double>::infinity())},
+      {"embedding", static_cast<double>(std::numeric_limits<float>::max()) * 2.0},
+      {"embedding", std::numeric_limits<double>::quiet_NaN()}};
+  for (const auto& [field, value] : invalid) {
+    Json valid = Json::object();
+    valid["uid"] = Json::string("valid prefix");
+    Json snapshot = snapshot_with_node(valid);
+    Json bad = Json::object();
+    bad["uid"] = Json::string("bad");
+    bad[field] = Json::number(value);
+    if (field == "embedding") {
+      bad[field] = Json::array();
+      bad[field].push(Json::number(value));
+    }
+    snapshot["nodes"].push(std::move(bad));
+    CHECK(storage.from_json(snapshot) == Err::ParseError);
+    CHECK(storage.node_count() == 2 && storage.edge_count() == 1);
+    CHECK(storage.find_by_name(NodeKind::Entity, "kept")->uid == original.uid);
+    CHECK(storage.find_edge(original.uid, other.uid, RelType::INVOLVES));
+    CHECK(!storage.get_node("valid prefix"));
+  }
+}
+
 int main() {
   test_adjacency_and_snapshot();
   test_upsert_and_geo();
+  test_snapshot_defaults_and_numeric_boundaries();
+  test_invalid_snapshot_preserves_graph();
   return AME_TEST_REPORT();
 }

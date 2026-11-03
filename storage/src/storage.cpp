@@ -26,6 +26,8 @@
 #include <cmath>
 #include <fstream>
 #include <mutex>
+#include <limits>
+#include <stdexcept>
 #include <shared_mutex>
 #include <sstream>
 
@@ -332,25 +334,66 @@ static Json node_to_json(const Node& n) {
 //   步骤1：逐字段读取，缺失则用默认值（importance 默认 0.5，precision 默认 3，
 //          其余为 0/空串）；枚举字段由数值强转；
 //   步骤2：embedding/attrs 字段存在则逐项回填到向量/映射。
+static std::string string_member(const Json& object, const std::string& key) {
+  const Json* value = object.find(key);
+  return value ? value->as_str() : "";
+}
+
+static double number_member(const Json& object, const std::string& key, double fallback = 0) {
+  const Json* value = object.find(key);
+  return value ? value->as_num(fallback) : fallback;
+}
+
+template <typename Integer>
+static Integer checked_integer(double value) {
+  // Compare the truncated value against an exclusive power-of-two upper bound.
+  // Converting INT64_MAX to double rounds up and is not a safe inclusive bound.
+  const double limit = std::ldexp(1.0, std::numeric_limits<Integer>::digits);
+  const double integral = std::trunc(value);
+  if (!std::isfinite(integral) || integral < -limit || integral >= limit)
+    throw std::out_of_range("snapshot integer is out of range");
+  return static_cast<Integer>(integral);
+}
+
+static Vec embedding_member(const Json& object) {
+  Vec embedding;
+  const Json* values = object.find("embedding");
+  if (!values) return embedding;
+  for (const auto& value : values->arr) {
+    double number = value.as_num();
+    if (!std::isfinite(number) || std::fabs(number) > std::numeric_limits<float>::max())
+      throw std::out_of_range("snapshot embedding is out of range");
+    embedding.push_back(static_cast<float>(number));
+  }
+  return embedding;
+}
+
+static Attrs attributes_member(const Json& object) {
+  Attrs attributes;
+  const Json* values = object.find("attrs");
+  if (!values) return attributes;
+  for (const auto& [key, value] : values->obj) attributes[key] = value.as_str();
+  return attributes;
+}
+
 static Node node_from_json(const Json& j) {
   Node n;
-  n.uid = j.find("uid") ? j.find("uid")->as_str() : "";
-  n.kind = (NodeKind)(int)(j.find("kind") ? j.find("kind")->as_num() : 0);
-  n.name = j.find("name") ? j.find("name")->as_str() : "";
-  n.text = j.find("text") ? j.find("text")->as_str() : "";
-  n.type = j.find("type") ? j.find("type")->as_str() : "";
-  n.ts = (TimePoint)(j.find("ts") ? j.find("ts")->as_num() : 0);
-  n.precision = (Precision)(int)(j.find("precision") ? j.find("precision")->as_num() : 3);
-  n.importance = j.find("importance") ? j.find("importance")->as_num(0.5) : 0.5;
-  n.lat = j.find("lat") ? j.find("lat")->as_num() : 0;
-  n.lng = j.find("lng") ? j.find("lng")->as_num() : 0;
-  n.geohash = j.find("geohash") ? j.find("geohash")->as_str() : "";
-  n.status = (int)(j.find("status") ? j.find("status")->as_num() : 0);
-  n.mention_count = (int)(j.find("mention_count") ? j.find("mention_count")->as_num() : 0);
-  if (auto* e = j.find("embedding"))
-    for (auto& v : e->arr) n.embedding.push_back((float)v.as_num());
-  if (auto* a = j.find("attrs"))
-    for (auto& kv : a->obj) n.attrs[kv.first] = kv.second.as_str();
+  n.uid = string_member(j, "uid");
+  n.kind = static_cast<NodeKind>(checked_integer<int>(number_member(j, "kind")));
+  n.name = string_member(j, "name");
+  n.text = string_member(j, "text");
+  n.type = string_member(j, "type");
+  n.ts = checked_integer<TimePoint>(number_member(j, "ts"));
+  const Json* precision = j.find("precision");
+  n.precision = static_cast<Precision>(checked_integer<int>(precision ? precision->as_num() : 3));
+  n.importance = number_member(j, "importance", 0.5);
+  n.lat = number_member(j, "lat");
+  n.lng = number_member(j, "lng");
+  n.geohash = string_member(j, "geohash");
+  n.status = checked_integer<int>(number_member(j, "status"));
+  n.mention_count = checked_integer<int>(number_member(j, "mention_count"));
+  n.embedding = embedding_member(j);
+  n.attrs = attributes_member(j);
   return n;
 }
 
@@ -386,33 +429,40 @@ Json Storage::to_json() const {
 }
 
 // 伪代码：从 JSON 对象重建（load 的纯数据部分）
-//   步骤1：取独占锁，清空 nodes_/out_/in_/名字索引；
+//   步骤1：先解码并检查节点数值范围，失败保留旧图；取独占锁后清空各索引；
 //   步骤2：逐节点反序列化并同步重建名字索引；
 //   步骤3：逐边还原（type 由名字反查，无法识别跳过），重建双邻接表。
 Err Storage::from_json(const Json& root) {
+  // Decode before replacing the live graph, so invalid numeric input cannot
+  // leave callers with a partially restored or empty snapshot.
+  std::vector<Node> decoded;
+  try {
+    if (const Json* nodes = root.find("nodes")) {
+      decoded.reserve(nodes->arr.size());
+      for (const auto& node : nodes->arr) decoded.push_back(node_from_json(node));
+    }
+  } catch (const std::out_of_range&) {
+    return Err::ParseError;
+  }
   std::unique_lock lk(mu_);
   nodes_.clear();
   out_.clear();
   in_.clear();
   name_index_.clear();
-  if (auto* jn = root.find("nodes"))
-    for (auto& j : jn->arr) {
-      Node n = node_from_json(j);
-      // 同步重建名字索引（与 put_node 同一语义）
-      name_index_[std::to_string((int)n.kind) + "|" + n.name].push_back(n.uid);
-      nodes_[n.uid] = std::move(n);
-    }
+  for (auto& node : decoded) {
+    name_index_[std::to_string(static_cast<int>(node.kind)) + "|" + node.name].push_back(node.uid);
+    nodes_[node.uid] = std::move(node);
+  }
   if (auto* je = root.find("edges"))
     for (auto& j : je->arr) {
       Edge e;
-      e.from = j.find("from") ? j.find("from")->as_str() : "";
-      e.to = j.find("to") ? j.find("to")->as_str() : "";
-      auto t = rel_from_name(j.find("type") ? j.find("type")->as_str() : "");
+      e.from = string_member(j, "from");
+      e.to = string_member(j, "to");
+      auto t = rel_from_name(string_member(j, "type"));
       if (!t) continue;
       e.type = *t;
-      e.weight = j.find("weight") ? j.find("weight")->as_num(1.0) : 1.0;
-      if (auto* a = j.find("attrs"))
-        for (auto& kv : a->obj) e.attrs[kv.first] = kv.second.as_str();
+      e.weight = number_member(j, "weight", 1.0);
+      e.attrs = attributes_member(j);
       out_[e.from].push_back(e);
       in_[e.to].push_back(e);
     }

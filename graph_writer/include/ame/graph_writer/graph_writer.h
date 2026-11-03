@@ -52,6 +52,15 @@ class GraphWriter {
   std::string get_or_create_place(const ExtractedPlace& p, bool* created = nullptr);
 
  private:
+  Node create_event(const Extraction& extraction);
+  std::vector<std::string> link_entities(
+      const std::string& event_uid, const Extraction& extraction,
+      const std::vector<std::pair<std::string, std::string>>& resolved_entities, WriteResult& result);
+  std::string link_place(const std::string& event_uid, const ExtractedPlace& place);
+  std::vector<std::string> link_keywords(const std::string& event_uid,
+                                        const std::vector<ExtractedKeyword>& keywords);
+  void activate_keyword(const std::string& uid);
+  void link_next(const std::string& event_uid);
   void auto_grow(const Node& ev, const std::vector<std::string>& entity_uids,
                  const std::vector<std::string>& kw_uids, const std::string& place_uid);
   // 知识更新：同实体同槽位词的旧事件标 valid_to 并连 SUPERSEDES 边

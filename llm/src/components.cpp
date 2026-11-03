@@ -65,57 +65,66 @@ static Json parse_array_salvage(const std::string& resp) {
   return out;
 }
 
-// 把一条 JSON 提取结果映射为 Extraction（event.text 由调用方填原文）
-static Extraction json_to_extraction(const Json& j) {
-  Extraction ex;
-  const Json* type = j.find("type");
-  ex.event.type = type ? type->as_str("generic") : "generic";
-  static const char* kCats[] = {"action", "attr", "topic", "sentiment", "concept"};
-  auto norm_cat = [&](std::string c) {
-    for (auto* k : kCats)
-      if (c == k) return c;
-    return std::string("attr");  // 未知类别归并到 attr
-  };
-  const Json* ents = j.find("entities");
-  if (ents) {
-    for (auto& e : ents->arr) {
-      ExtractedEntity ee;
-      const Json* s = e.find("surface");
-      ee.surface = s ? s->as_str() : "";
-      const Json* r = e.find("role");
-      ee.role = r ? r->as_str("人物") : "人物";
-      const Json* t = e.find("type");
-      ee.entity_type = t ? t->as_str("person") : "person";
-      if (!ee.surface.empty()) ex.entities.push_back(std::move(ee));
-    }
+static std::string extraction_string(const Json& value, const char* key,
+                                     const std::string& fallback = "") {
+  const Json* field = value.find(key);
+  return field ? field->as_str(fallback) : fallback;
+}
+
+static std::string normalize_category(const std::string& category) {
+  static const char* categories[] = {"action", "attr", "topic", "sentiment", "concept"};
+  for (const char* known : categories)
+    if (category == known) return category;
+  return "attr";
+}
+
+static std::vector<ExtractedEntity> parse_entities(const Json* values) {
+  std::vector<ExtractedEntity> result;
+  if (!values) return result;
+  for (const auto& value : values->arr) {
+    ExtractedEntity entity;
+    entity.surface = extraction_string(value, "surface");
+    entity.role = extraction_string(value, "role", "人物");
+    entity.entity_type = extraction_string(value, "type", "person");
+    if (!entity.surface.empty()) result.push_back(std::move(entity));
   }
-  const Json* kws = j.find("keywords");
-  if (kws) {
-    for (auto& k : kws->arr) {
-      ExtractedKeyword ek;
-      const Json* w = k.find("word");
-      ek.word = w ? w->as_str() : "";
-      const Json* c = k.find("category");
-      ek.category = norm_cat(c ? c->as_str() : "");
-      if (!ek.word.empty()) ex.keywords.push_back(std::move(ek));
-    }
+  return result;
+}
+
+static std::vector<ExtractedKeyword> parse_keywords(const Json* values) {
+  std::vector<ExtractedKeyword> result;
+  if (!values) return result;
+  for (const auto& value : values->arr) {
+    ExtractedKeyword keyword;
+    keyword.word = extraction_string(value, "word");
+    keyword.category = normalize_category(extraction_string(value, "category"));
+    if (!keyword.word.empty()) result.push_back(std::move(keyword));
   }
-  // 属性三元组（实体档案槽位）：{"entity","slot","value"}
-  const Json* attrs = j.find("attributes");
-  if (attrs) {
-    for (auto& a : attrs->arr) {
-      ExtractedAttribute ea;
-      const Json* en = a.find("entity");
-      const Json* sl = a.find("slot");
-      const Json* va = a.find("value");
-      ea.entity = en ? en->as_str() : "";
-      ea.slot = sl ? sl->as_str() : "";
-      ea.value = va ? va->as_str() : "";
-      if (!ea.entity.empty() && !ea.slot.empty() && !ea.value.empty())
-        ex.attributes.push_back(std::move(ea));
-    }
+  return result;
+}
+
+static std::vector<ExtractedAttribute> parse_attributes(const Json* values) {
+  std::vector<ExtractedAttribute> result;
+  if (!values) return result;
+  for (const auto& value : values->arr) {
+    ExtractedAttribute attribute;
+    attribute.entity = extraction_string(value, "entity");
+    attribute.slot = extraction_string(value, "slot");
+    attribute.value = extraction_string(value, "value");
+    if (attribute.entity.empty() || attribute.slot.empty() || attribute.value.empty()) continue;
+    result.push_back(std::move(attribute));
   }
-  return ex;
+  return result;
+}
+
+// event.text 仍由调用方填原文；可选字段缺失与空值的默认规则保持一致。
+static Extraction json_to_extraction(const Json& value) {
+  Extraction result;
+  result.event.type = extraction_string(value, "type", "generic");
+  result.entities = parse_entities(value.find("entities"));
+  result.keywords = parse_keywords(value.find("keywords"));
+  result.attributes = parse_attributes(value.find("attributes"));
+  return result;
 }
 
 // extract_session 伪代码：

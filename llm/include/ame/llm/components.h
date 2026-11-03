@@ -94,20 +94,24 @@ class LlmJudge : public IJudge { public:
 
 // 词典蒸馏（增量+多文件模式）：vocab_paths 支持多个词频文件（逗号分隔由调用方拆开，
 // 合并词频），跳过 out_path 已有词条（断点续跑），批量 LLM 蒸馏 synonyms/antonyms/related，
-// 每批合并落盘 out_path。返回本次新增词条数（失败返回 -1）。
+// 每批合并落盘 out_path。返回本次新增词条数（输入/写入失败或 batch<=0 返回 -1）。
 int build_lexicon_json(ILlmClient& client, const std::vector<std::string>& vocab_paths,
                        const std::string& out_path, int top_n, int batch, int concurrency);
 
 // 复活工程第四轮 M2：蒸馏词库 strong 流可互换性二次精筛。逐对问 LLM
 // "大多数句子里 A 能否直接替换 B 且句意不变"，只保留答 yes 的对；
 // in_path 为蒸馏产物（source=distilled），out_path 写新文件（不动原始产物），
-// 根字段带 validated=true；断点续跑（按 word 跳过已完成），批量磁盘缓存。
+// 根字段带 validated=true、checkpoint_version=2；仅在整个 word 的所有 pair
+// 完成后落盘。中断续跑时重做未完成 word；旧版检查点中的当前输入词会重新校验，
+// 因为旧格式无法区分“已拒绝”和“尚未处理”的 pair，无关历史词仍保留。
 // 返回处理的 pair 总数（失败返回 -1）。
 int validate_lexicon_json(ILlmClient& client, const std::string& in_path,
                           const std::string& out_path, int batch, int concurrency);
 
 // 复活工程第五轮 M3：词级近似连续打分（1-10 → /10），候选=输入词库 strong∪near
 // 并集；产出 {"source":"distilled-sim","sims":{w:{v:score}}}；断点续跑。
+// 整个 word 完成后提交；已有分数缺少当前候选时重新评分该 word。
+// 两种 pair 任务均要求 batch>0；输入/写入失败返回 -1，检查点在 Linux 原子替换。
 int score_word_sims(ILlmClient& client, const std::string& in_path,
                     const std::string& out_path, int batch, int concurrency);
 

@@ -2,6 +2,10 @@
  * M1 extractor 单元测试：规则提取的实体/地点/关键词/时间词解析
  */
 #include <cstdlib>
+#include <algorithm>
+#include <fstream>
+#include <limits>
+#include <tuple>
 #include <filesystem>
 #include <unordered_set>
 
@@ -166,6 +170,169 @@ static void test_dat_trie() {
   CHECK(ac == d.match("回家路上，心理健康"));
 }
 
+static bool extracted_entity(const Extraction& ex, const std::string& name) {
+  return std::any_of(ex.entities.begin(), ex.entities.end(),
+                     [&](const ExtractedEntity& entity) { return entity.surface == name; });
+}
+static int keyword_count(const Extraction& ex, const std::string& word) {
+  return (int)std::count_if(ex.keywords.begin(), ex.keywords.end(),
+                            [&](const ExtractedKeyword& keyword) { return keyword.word == word; });
+}
+static void test_extraction_stage_priority() {
+  RuleExtractor ext;
+  ext.add_place("公园", 0, 0);
+  ext.add_keyword("车", "attr");
+  std::ofstream("/tmp/ame_stage_words.txt") << "跑步\n失眠\npressure\n";
+  CHECK(ext.load_keyword_dict("/tmp/ame_stage_words.txt", "concept", 10) == 3);
+  auto ex = ext.extract("小王和老张昨天在朝阳公园骑自行车跑步，失眠 PRESSURE");
+  CHECK(ex.place.name == "朝阳公园");
+  CHECK(ex.entities[0].surface == "老张" && ex.entities[1].surface == "小王");
+  CHECK(extracted_entity(ex, "自行车") && extracted_entity(ex, "车"));
+  CHECK(keyword_count(ex, "车") == 0);
+  CHECK(keyword_count(ex, "跑步") == 1 && keyword_count(ex, "失眠") == 1);
+  CHECK(keyword_count(ex, "pressure") == 1);
+  CHECK(ex.event.type == "跑步");
+}
+static void test_english_token_boundaries() {
+  RuleExtractor ext;
+  CHECK(extracted_entity(ext.extract("we met New  York"), "New  York"));
+  auto spaced = ext.extract("we met New   York");
+  CHECK(extracted_entity(spaced, "New") && extracted_entity(spaced, "York"));
+  auto punctuation = ext.extract("we met New. York");
+  CHECK(extracted_entity(punctuation, "New") && !extracted_entity(punctuation, "York"));
+  CHECK(keyword_count(punctuation, "york") == 1);
+  auto repeated = ext.extract("we met Alice and Alice");
+  CHECK(repeated.entities.size() == 1 && repeated.entities[0].surface == "Alice");
+  auto mixed = ext.extract("老张 and Alice enjoy coffee. Museum");
+  CHECK(extracted_entity(mixed, "老张") && extracted_entity(mixed, "Alice"));
+  CHECK(keyword_count(mixed, "coffee") == 1 && keyword_count(mixed, "museum") == 1);
+}
+
+struct CacheTestNode {
+  int out = -1;
+  int fail = 0;
+  int outlink = 0;
+  std::vector<std::pair<uint32_t, int>> next;
+};
+struct CacheTestData {
+  std::vector<std::string> words{"ab", "b"};
+  std::vector<int> lengths{2, 1};
+  std::vector<CacheTestNode> nodes{
+      {-1, 0, 0, {{'a', 1}, {'b', 3}}}, {-1, 0, 0, {{'b', 2}}},
+      {0, 3, 3, {}}, {1, 0, 0, {}}};
+};
+template <typename T> static void cache_write(std::ostream& out, T value) {
+  out.write(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+static void cache_write_string(std::ostream& out, const std::string& value) {
+  cache_write(out, (uint16_t)value.size());
+  out.write(value.data(), (std::streamsize)value.size());
+}
+static void write_cache_fixture(const std::string& path, const CacheTestData& data) {
+  std::ofstream out(path, std::ios::binary);
+  out.write("AMEAC", 5);
+  cache_write(out, uint32_t{1});
+  cache_write(out, uint64_t{123});
+  cache_write(out, uint64_t{456});
+  cache_write(out, (uint32_t)data.words.size());
+  for (size_t i = 0; i < data.words.size(); ++i) {
+    cache_write_string(out, data.words[i]);
+    cache_write_string(out, "concept");
+    cache_write(out, data.lengths[i]);
+  }
+  cache_write(out, (uint32_t)data.nodes.size());
+  for (const auto& node : data.nodes) {
+    cache_write(out, node.out);
+    cache_write(out, node.fail);
+    cache_write(out, node.outlink);
+    cache_write(out, (uint32_t)node.next.size());
+    for (const auto& edge : node.next) {
+      cache_write(out, edge.first);
+      cache_write(out, edge.second);
+    }
+  }
+}
+static void expect_cache_rejected(RuleExtractor& ext, const CacheTestData& data) {
+  const std::string path = "/tmp/ame_bad_structure.cache";
+  const auto before = ext.ac_match("ab b");
+  write_cache_fixture(path, data);
+  CHECK(!ext.ac_load(path, 123, 456));
+  CHECK(ext.ac_match("ab b") == before);
+}
+static void test_ac_cache_structure_validation() {
+  const std::string path = "/tmp/ame_valid_structure.cache";
+  write_cache_fixture(path, CacheTestData{});
+  RuleExtractor ext;
+  CHECK(ext.ac_load(path, 123, 456));
+  CHECK(ext.ac_match("ab").size() == 2);  // Includes suffix output through outlink.
+  CacheTestData bad;
+  bad.nodes[2].out = 2;
+  expect_cache_rejected(ext, bad);
+  bad = CacheTestData{}; bad.nodes[2].fail = 2;
+  expect_cache_rejected(ext, bad);
+  bad = CacheTestData{}; bad.nodes[2].outlink = 2;
+  expect_cache_rejected(ext, bad);
+  bad = CacheTestData{}; bad.nodes[0].next[0].second = 99;
+  expect_cache_rejected(ext, bad);
+  bad = CacheTestData{}; bad.nodes[1].next[0].second = 1;
+  expect_cache_rejected(ext, bad);  // Trie transition cycle.
+  bad = CacheTestData{}; std::reverse(bad.nodes[0].next.begin(), bad.nodes[0].next.end());
+  expect_cache_rejected(ext, bad);
+  bad = CacheTestData{}; bad.nodes.push_back({});
+  expect_cache_rejected(ext, bad);  // Unreachable node.
+  bad = CacheTestData{}; bad.lengths[0] = 10;
+  expect_cache_rejected(ext, bad);
+  bad = CacheTestData{}; bad.nodes[3].out = 0;
+  expect_cache_rejected(ext, bad);  // Output length differs from the trie depth.
+}
+static void patch_cache_count(const std::string& path, std::streamoff offset) {
+  std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+  file.seekp(offset);
+  cache_write(file, std::numeric_limits<uint32_t>::max());
+}
+static void test_ac_cache_truncation_and_counts() {
+  const std::string path = "/tmp/ame_bad_payload.cache";
+  CacheTestData data;
+  RuleExtractor ext;
+  write_cache_fixture(path, data);
+  CHECK(ext.ac_load(path, 123, 456));
+  const auto before = ext.ac_match("ab b");
+  const auto size = std::filesystem::file_size(path);
+  for (uintmax_t truncated : {uintmax_t{0}, uintmax_t{29}, size - 1}) {
+    write_cache_fixture(path, data);
+    std::filesystem::resize_file(path, truncated);
+    CHECK(!ext.ac_load(path, 123, 456));
+    CHECK(ext.ac_match("ab b") == before);
+  }
+  // Header is 25 bytes; words consume 17+16 bytes; node table starts at 62.
+  for (std::streamoff count_offset : {25, 62, 78}) {
+    write_cache_fixture(path, data);
+    patch_cache_count(path, count_offset);
+    CHECK(!ext.ac_load(path, 123, 456));
+    CHECK(ext.ac_match("ab b") == before);
+  }
+  write_cache_fixture(path, data);
+  CHECK(!ext.ac_load(path, 124, 456));
+  CHECK(ext.ac_match("ab b") == before);
+}
+static void test_ac_cache_rebuild_replaces_old_state() {
+  const std::string dict = "/tmp/ame_rebuild_dict.txt";
+  const std::string cache = "/tmp/ame_rebuild_dict.cache";
+  std::ofstream(dict) << "oldword\n";
+  std::filesystem::remove(cache);
+  RuleExtractor ext;
+  CHECK(ext.load_keyword_dict_cached(dict, "concept", 10, cache) == 1);
+  std::ofstream(dict) << "replacement\n";
+  std::ofstream(cache, std::ios::binary) << "AMEAC";
+  CHECK(ext.load_keyword_dict_cached(dict, "concept", 10, cache) == 1);
+  CHECK(ext.ac_match("oldword").empty());
+  CHECK(ext.ac_match("replacement").size() == 1);
+  CHECK(ext.load_keyword_dict_cached(dict, "concept", 10, cache) == 1);
+  CHECK(ext.ac_match("replacement").size() == 1);
+  CHECK(ext.load_keyword_dict_cached("/tmp/ame_missing_dict_98231", "concept", 10, cache) == -1);
+  CHECK(ext.ac_match("replacement").size() == 1);
+}
+
 int main() {
   test_extract_basic();
   test_extract_time_words();
@@ -175,5 +342,10 @@ int main() {
   test_ac_automaton();
   test_ac_persistence();
   test_dat_trie();
+  test_extraction_stage_priority();
+  test_english_token_boundaries();
+  test_ac_cache_structure_validation();
+  test_ac_cache_truncation_and_counts();
+  test_ac_cache_rebuild_replaces_old_state();
   return AME_TEST_REPORT();
 }

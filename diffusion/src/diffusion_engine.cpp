@@ -24,7 +24,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <queue>
 #include <unordered_set>
 
 namespace ame {
@@ -65,92 +64,134 @@ DiffusionResult DiffusionEngine::diffuse(const std::vector<DiffusionSeed>& seeds
 //   ① beam 剪枝：beam_width>0 时每层先把波前按能量降序截断到 beam_width；
 //   ② 边传导分：gate_fn 非空时由门控函数给出（监督边门控），否则规则传导。
 // 能量衰减/路径记录/top3/budget/休眠隔离语义与 diffuse 完全一致。
+namespace {
+
+struct Frontier {
+  std::string uid;
+  double energy;
+  int hop;
+  Path path;
+};
+
+// One traversal owns its result, expansion budget and per-layer frontier state.
+class DiffusionTraversal {
+ public:
+  DiffusionTraversal(const Storage& storage, int depth, const std::vector<RelType>* rel_types,
+                     const std::unordered_map<int, double>* weights, int budget, int beam_width,
+                     const DiffusionEngine::GateFn& gate)
+      : storage_(storage), depth_(depth), rel_types_(rel_types), weights_(weights),
+        budget_(budget), beam_width_(beam_width), gate_(gate) {}
+
+  DiffusionResult run(const std::vector<DiffusionSeed>& seeds) {
+    auto current = seed_frontier(seeds);
+    while (!current.empty()) {
+      trim_beam(current);
+      current = expand_layer(current);
+    }
+    return std::move(result_);
+  }
+
+ private:
+  std::vector<Frontier> seed_frontier(const std::vector<DiffusionSeed>& seeds) {
+    std::vector<Frontier> frontier;
+    for (const auto& seed : seeds) {
+      if (!storage_.get_node(seed.node_uid)) continue;
+      auto& energy = result_[seed.node_uid];
+      energy.energy += seed.weight;
+      Path path;
+      path.energy = seed.weight;
+      energy.paths.push_back(path);
+      frontier.push_back({seed.node_uid, seed.weight, 0, path});
+    }
+    return frontier;
+  }
+
+  void trim_beam(std::vector<Frontier>& frontier) const {
+    if (beam_width_ <= 0 || frontier.size() <= static_cast<size_t>(beam_width_)) return;
+    std::sort(frontier.begin(), frontier.end(),
+              [](const Frontier& a, const Frontier& b) { return a.energy > b.energy; });
+    frontier.resize(beam_width_);
+  }
+
+  std::vector<Frontier> expand_layer(const std::vector<Frontier>& current) {
+    std::vector<Frontier> next;
+    std::unordered_set<std::string> queued;
+    for (const auto& frontier : current) {
+      if (frontier.hop >= depth_) continue;
+      if (expanded_count_ >= budget_) break;
+      if (!expanded_.insert(frontier.uid).second) continue;
+      ++expanded_count_;
+      expand_frontier(frontier, next, queued);
+    }
+    return next;
+  }
+
+  double transmission(const Edge& edge, const Node* head, const Node& tail, int hop) const {
+    if (gate_ && head) return gate_(edge, *head, tail, hop);
+    double multiplier = 1.0;
+    if (weights_) {
+      auto it = weights_->find(static_cast<int>(edge.type));
+      if (it != weights_->end()) multiplier = it->second;
+    }
+    double weight = edge.weight;
+    if (weight > 5.0) weight = 5.0 + std::log1p(weight - 5.0);
+    return conduction_coeff(edge.type) * weight * multiplier;
+  }
+
+  void record_path(const std::string& uid, const Path& path) {
+    auto& energy = result_[uid];
+    energy.energy += path.energy;
+    energy.paths.push_back(path);
+    std::sort(energy.paths.begin(), energy.paths.end(),
+              [](const Path& a, const Path& b) { return a.energy > b.energy; });
+    if (energy.paths.size() > 3) energy.paths.resize(3);
+  }
+
+  void expand_frontier(const Frontier& frontier, std::vector<Frontier>& next,
+                        std::unordered_set<std::string>& queued) {
+    auto neighbors = storage_.neighbors(frontier.uid, rel_types_);
+    // Degree includes dormant/pruned edges, as in the original normalization.
+    double degree = static_cast<double>(neighbors.size());
+    const Node* head = storage_.get_node(frontier.uid);
+    for (const auto& [edge, node] : neighbors) {
+      if (node->kind == NodeKind::Keyword && node->status == 1) continue;
+      double transfer = transmission(edge, head, *node, frontier.hop);
+      double energy = frontier.energy * transfer * static_cast<double>(frontier.hop + 1) /
+                      static_cast<double>(frontier.hop + 2) / degree;
+      if (energy < 0.01) continue;
+      Path path = frontier.path;
+      path.steps.push_back({frontier.uid, node->uid, edge.type});
+      path.energy = energy;
+      record_path(node->uid, path);
+      // Accumulate every incoming path, but expand only the first one in this layer.
+      if (queued.insert(node->uid).second)
+        next.push_back({node->uid, energy, frontier.hop + 1, path});
+    }
+  }
+
+  const Storage& storage_;
+  int depth_;
+  const std::vector<RelType>* rel_types_;
+  const std::unordered_map<int, double>* weights_;
+  int budget_;
+  int beam_width_;
+  const DiffusionEngine::GateFn& gate_;
+  DiffusionResult result_;
+  std::unordered_set<std::string> expanded_;
+  int expanded_count_ = 0;
+};
+
+}  // namespace
+
 DiffusionResult DiffusionEngine::diffuse_beam(const std::vector<DiffusionSeed>& seeds,
                                               int depth,
                                               const std::vector<RelType>* rel_types,
                                               const std::unordered_map<int, double>* weights,
                                               int budget, int beam_width,
                                               const GateFn& gate_fn) const {
-  if (depth < 2) depth = 2;  // 深度硬限 2~3
-  if (depth > 3) depth = 3;
-
-  DiffusionResult result;
-  struct Frontier {
-    std::string uid;
-    double energy;   // 到达该节点的能量（已含 1/(hop+1)）
-    int hop;
-    Path path;
-  };
-  std::vector<Frontier> cur;
-  std::unordered_set<std::string> expanded;
-  int expanded_count = 0;
-
-  for (auto& s : seeds) {
-    if (!storage_.get_node(s.node_uid)) continue;
-    auto& ne = result[s.node_uid];
-    ne.energy += s.weight;
-    Path p; p.energy = s.weight;
-    ne.paths.push_back(p);
-    cur.push_back({s.node_uid, s.weight, 0, p});
-  }
-
-  while (!cur.empty()) {
-    if (beam_width > 0 && (int)cur.size() > beam_width) {  // beam 剪枝：top-m 前沿
-      std::sort(cur.begin(), cur.end(),
-                [](const Frontier& a, const Frontier& b) { return a.energy > b.energy; });
-      cur.resize(beam_width);
-    }
-    std::vector<Frontier> next;
-    for (auto& f : cur) {
-      if (f.hop >= depth) continue;
-      if (expanded_count >= budget) break;  // budget 限制扩展节点数
-      if (expanded.count(f.uid)) continue;
-      expanded.insert(f.uid);
-      ++expanded_count;
-
-      auto nbs = storage_.neighbors(f.uid, rel_types);
-      // PageRank 式出度归一：枢纽节点（如主角实体，邻边数百条）的能量摊薄到每条边，
-      // 防止"种子在高产节点上均匀喷灌"淹没直接证据（通用机制，对应设计文档"扩散爆炸：
-      // 深度/密度双限"）。
-      double deg = (double)nbs.size();
-      const Node* head = storage_.get_node(f.uid);
-      for (auto& [e, nb] : nbs) {
-        // 休眠关键词不参与扩散
-        if (nb->kind == NodeKind::Keyword && nb->status == 1) continue;
-        double trans;
-        if (gate_fn && head) {
-          trans = gate_fn(e, *head, *nb, f.hop);  // 监督边门控传导
-        } else {
-          double mult = 1.0;
-          if (weights) {
-            auto it = weights->find((int)e.type);
-            if (it != weights->end()) mult = it->second;
-          }
-          trans = conduction_coeff(e.type) * e.weight * mult;  // 边传导（规则）
-          if (e.weight > 5.0) trans = conduction_coeff(e.type) * (5.0 + std::log1p(e.weight - 5.0)) * mult;  // 高频边软化
-        }
-        double child_e = f.energy * trans * (double)(f.hop + 1) / (double)(f.hop + 2) / deg;
-        // 能量按 1/(hop+1) 衰减：hop+1 跳处相对 hop 处的增量因子；按出度摊薄
-        if (child_e < 0.01) continue;  // 能量枯竭剪枝
-
-        Path p = f.path;
-        p.steps.push_back({f.uid, nb->uid, e.type});
-        p.energy = child_e;
-
-        auto& ne = result[nb->uid];
-        bool seen = false;  // 同一节点同一 hop 内避免重复入队
-        for (auto& x : next) if (x.uid == nb->uid) { seen = true; break; }
-        ne.energy += child_e;
-        ne.paths.push_back(p);
-        std::sort(ne.paths.begin(), ne.paths.end(),
-                  [](const Path& a, const Path& b) { return a.energy > b.energy; });
-        if (ne.paths.size() > 3) ne.paths.resize(3);  // 每节点保留 top3 路径
-        if (!seen && f.hop + 1 <= depth) next.push_back({nb->uid, child_e, f.hop + 1, p});
-      }
-    }
-    cur = std::move(next);
-  }
-  return result;
+  DiffusionTraversal traversal(storage_, std::clamp(depth, 2, 3), rel_types, weights,
+                               budget, beam_width, gate_fn);
+  return traversal.run(seeds);
 }
 
 }  // namespace ame

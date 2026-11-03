@@ -68,196 +68,177 @@ void RuleExtractor::add_keyword(const std::string& word, const std::string& cate
   kw_dict_.emplace_back(word, category);
 }
 
-// 子串匹配辅助：判断 word 是否出现在 text 中，若出现且 pos 非空则回写首次出现位置。
-// 按文本中出现位置取最长匹配优先
-static bool contains_at(const std::string& text, const std::string& word, size_t* pos) {
-  size_t p = text.find(word);
-  if (p == std::string::npos) return false;
-  if (pos) *pos = p;
+namespace {
+bool has_entity(const Extraction& ex, const std::string& surface) {
+  return std::any_of(ex.entities.begin(), ex.entities.end(),
+                     [&](const ExtractedEntity& entity) { return entity.surface == surface; });
+}
+bool entity_covers(const Extraction& ex, const std::string& word) {
+  return std::any_of(ex.entities.begin(), ex.entities.end(), [&](const ExtractedEntity& entity) {
+    return entity.surface.find(word) != std::string::npos;
+  });
+}
+bool has_keyword(const Extraction& ex, const std::string& word) {
+  return std::any_of(ex.keywords.begin(), ex.keywords.end(),
+                     [&](const ExtractedKeyword& keyword) { return keyword.word == word; });
+}
+void add_entity(Extraction& ex, const std::string& name, const std::string& role,
+                 const std::string& type) {
+  if (!has_entity(ex, name)) ex.entities.push_back({name, role, type, {}});
+}
+void extract_honorific(const std::string& text, const std::string& prefix, Extraction& ex) {
+  size_t pos = 0;
+  while ((pos = text.find(prefix, pos)) != std::string::npos) {
+    size_t start = pos + prefix.size();
+    if (start + 3 <= text.size())
+      add_entity(ex, prefix + text.substr(start, 3), "人物", "person");
+    pos = start;
+  }
+}
+void extract_objects(const std::string& text, Extraction& ex) {
+  static const char* objects[] = {"自行车", "汽车", "车", "手机", "电脑"};
+  for (const char* word : objects)
+    if (text.find(word) != std::string::npos) add_entity(ex, word, "客体", "object");
+}
+void extract_dictionary_keywords(const std::string& text,
+                                  std::vector<std::pair<std::string, std::string>> dict,
+                                  Extraction& ex) {
+  std::sort(dict.begin(), dict.end(),
+            [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
+  for (const auto& [word, category] : dict) {
+    if (text.find(word) == std::string::npos || entity_covers(ex, word)) continue;
+    // Keep dictionary order and duplicate behavior; AC/English stages deduplicate later.
+    ex.keywords.push_back({word, category});
+  }
+}
+std::string lower_ascii(const std::string& text) {
+  std::string lower = text;
+  for (char& ch : lower)
+    if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+  return lower;
+}
+void extract_ac_keywords(const RuleExtractor& extractor, const std::string& text,
+                          Extraction& ex) {
+  for (const auto& [pos, word, category] : extractor.ac_match(lower_ascii(text))) {
+    (void)pos;
+    if (entity_covers(ex, word) || has_keyword(ex, word)) continue;
+    ex.keywords.push_back({word, category});
+  }
+}
+std::string lower_token(const std::string& text) {
+  std::string lower;
+  for (char ch : text) lower += (char)std::tolower((unsigned char)ch);
+  return lower;
+}
+bool has_lower_entity(const Extraction& ex, const std::string& lower) {
+  return std::any_of(ex.entities.begin(), ex.entities.end(), [&](const ExtractedEntity& entity) {
+    return lower_token(entity.surface) == lower;
+  });
+}
+bool english_content_word(const std::string& lower) {
+  static const std::unordered_set<std::string> stop = {
+      "this", "that", "with", "have", "from", "they", "them", "what", "when",
+      "where", "which", "there", "their", "would", "could", "should", "about",
+      "just", "like", "know", "really", "yeah", "okay", "well", "then", "than",
+      "some", "into", "over", "such", "only", "also", "very", "much", "been"};
+  return lower.size() >= 4 && !stop.count(lower);
+}
+struct EnglishTokenState {
+  bool sentence_start = true;
+  bool previous_capitalized = false;
+  size_t previous_end = 0;
+};
+bool merge_proper_name(const std::string& text, size_t begin, const std::string& token,
+                        bool capitalized, const EnglishTokenState& state, Extraction& ex) {
+  if (!capitalized || !state.previous_capitalized || begin <= state.previous_end) return false;
+  if (begin - state.previous_end > 2 || ex.entities.empty()) return false;
+  std::string joiner = text.substr(state.previous_end, begin - state.previous_end);
+  if (joiner.find_first_not_of(' ') != std::string::npos) return false;
+  ex.entities.back().surface += joiner + token;
   return true;
 }
+void classify_english_token(const std::string& token, const std::string& lower,
+                             bool capitalized, bool sentence_start, Extraction& ex) {
+  if (capitalized && token.size() >= 2 && !sentence_start && lower != "i") {
+    add_entity(ex, token, "人物", "person");
+    return;
+  }
+  if (!english_content_word(lower) || has_lower_entity(ex, lower) || has_keyword(ex, lower)) return;
+  ex.keywords.push_back({lower, "attr"});
+}
+size_t english_token_end(const std::string& text, size_t begin) {
+  size_t end = begin;
+  while (end < text.size() && (unsigned char)text[end] < 128 &&
+         std::isalnum((unsigned char)text[end])) ++end;
+  return end;
+}
+size_t extract_english_token(const std::string& text, size_t begin,
+                              EnglishTokenState& state, Extraction& ex) {
+  size_t end = english_token_end(text, begin);
+  std::string token = text.substr(begin, end - begin);
+  std::string lower = lower_token(token);
+  bool capitalized = std::isupper((unsigned char)token[0]) != 0;
+  if (!merge_proper_name(text, begin, token, capitalized, state, ex))
+    classify_english_token(token, lower, capitalized, state.sentence_start, ex);
+  state.previous_capitalized = capitalized;
+  state.previous_end = end;
+  state.sentence_start = false;
+  return end;
+}
+void extract_english(const std::string& text, Extraction& ex) {
+  EnglishTokenState state;
+  size_t offset = 0;
+  while (offset < text.size()) {
+    unsigned char ch = (unsigned char)text[offset];
+    if (ch < 128 && std::isalpha(ch)) {
+      offset = extract_english_token(text, offset, state, ex);
+      continue;
+    }
+    if (ch == '.' || ch == '!' || ch == '?') state.sentence_start = true;
+    ++offset;
+  }
+}
+void extract_event_metadata(const std::string& text, Extraction& ex) {
+  for (const auto& keyword : ex.keywords) {
+    if (keyword.category != "action") continue;
+    ex.event.type = keyword.word;
+    break;
+  }
+  struct RelativeTime { const char* word; int days; Precision precision; };
+  static const RelativeTime rules[] = {
+      {"前天", 2, Precision::Day}, {"昨天", 1, Precision::Day},
+      {"今天", 0, Precision::Day}, {"上个月", 30, Precision::Month},
+      {"去年", 365, Precision::Year}};
+  ex.event.time = TimeService::now_utc();
+  ex.event.precision = Precision::Day;
+  for (const auto& rule : rules) {
+    if (text.find(rule.word) == std::string::npos) continue;
+    ex.event.time -= (TimePoint)rule.days * 86400;
+    ex.event.precision = rule.precision;
+    break;
+  }
+}
+}  // namespace
 
-// 核心提取入口：对一段自由文本执行完整的规则提取流程，返回结构化 Extraction。
-// 伪代码：
-//   步骤1：初始化结果 ex，事件原文记为输入文本，其余字段取默认值。
-//   步骤2【地点】：将地名词典按名称长度降序排序（最长优先），逐个做子串匹配；
-//          命中第一个即写入地点（名称 + 经纬度 + has_coord=true）并停止，至多取一个地点。
-//   步骤3【实体·人物】：扫描称呼前缀"老"/"小"：每处命中截取其后 3 字节
-//          （UTF-8 一个汉字）拼成人名，去重后作为 role=人物、type=person 的实体加入。
-//   步骤4【实体·客体】：遍历内置物品词表（自行车/汽车/车/手机/电脑），
-//          命中且未重复者作为 role=客体、type=object 的实体加入。
-//   步骤5【关键词】：复制关键词词典并按词长降序排序；逐词匹配文本，
-//          若该词已被某个实体 surface 包含（视为被实体覆盖）则跳过，否则连同类别记入。
-//   步骤6【事件类型】：取关键词列表中第一个 category==action 的词作为事件类型；
-//          若无 action 词则保持默认 "generic"。
-//   步骤7【事件时间】：以当前 UTC 时间为基准，按相对时间词换算（按优先级互斥分支）：
-//          若含"前天"则 now-2 天、精度 Day；否则若含"昨天"则 now-1 天、Day；
-//          否则若含"今天"则 now、Day；否则若含"上个月"则 now-30 天、Month；
-//          否则若含"去年"则 now-365 天、Year；均不含则默认 now、Day。
-//   步骤8：返回 ex。
 Extraction RuleExtractor::extract(const std::string& text) {
   Extraction ex;
   ex.event.text = text;
-
-  // ---- 地点：最长地名优先 ----
   std::sort(places_.begin(), places_.end(),
-            [](auto& a, auto& b) { return a.name.size() > b.name.size(); });
-  for (auto& p : places_) {
-    if (contains_at(text, p.name, nullptr)) {
-      ex.place = {p.name, p.lat, p.lng, true};
-      break;
-    }
+            [](const auto& a, const auto& b) { return a.name.size() > b.name.size(); });
+  for (const auto& place : places_) {
+    if (text.find(place.name) == std::string::npos) continue;
+    ex.place = {place.name, place.lat, place.lng, true};
+    break;
   }
-
-  // ---- 实体：称呼模式 "老X"/"小X"/"X哥/X姐" + 组织/物品词典 ----
-  // UTF-8 中文每字 3 字节；扫描称呼前缀
-  auto scan_honorific = [&](const char* prefix, size_t plen) {
-    size_t pos = 0;
-    while ((pos = text.find(prefix, pos)) != std::string::npos) {
-      size_t start = pos + plen;
-      if (start + 3 <= text.size()) {
-        std::string name = std::string(prefix) + text.substr(start, 3);  // 老+一个汉字
-        bool dup = false;
-        for (auto& e : ex.entities)
-          if (e.surface == name) { dup = true; break; }
-        if (!dup) ex.entities.push_back({name, "人物", "person", {}});
-      }
-      pos = start;
-    }
-  };
-  scan_honorific("老", 3);
-  scan_honorific("小", 3);
-  // 常见物品/组织词
-  static const char* kObjects[] = {"自行车", "汽车", "车", "手机", "电脑"};
-  for (auto* w : kObjects) {
-    if (contains_at(text, w, nullptr)) {
-      bool dup = false;
-      for (auto& e : ex.entities) if (e.surface == w) { dup = true; break; }
-      if (!dup) ex.entities.push_back({w, "客体", "object", {}});
-    }
-  }
-
-  // ---- 关键词：词典匹配（长词优先，去重，跳过已被实体/地点覆盖的词）----
-  std::vector<std::pair<std::string, std::string>> dict = kw_dict_;
-  std::sort(dict.begin(), dict.end(),
-            [](auto& a, auto& b) { return a.first.size() > b.first.size(); });
-  for (auto& [w, cat] : dict) {
-    if (!contains_at(text, w, nullptr)) continue;
-    bool covered = false;
-    for (auto& e : ex.entities)
-      if (e.surface.find(w) != std::string::npos) { covered = true; break; }
-    if (covered) continue;
-    ex.keywords.push_back({w, cat});
-  }
-
-  // ---- 关键词：AC 自动机一遍扫描（load_keyword_dict 加载的大词表）----
-  // 大小写不敏感：对 ASCII 小写副本扫描（词表存小写；中文码点不受 tolower 影响）。
-  // 输出词条为词表词（小写），M3 normalize 同为小写语义，写入/查询两侧一致。
-  if (ac_built_) {
-    std::string scan_text = text;
-    for (auto& ch : scan_text)
-      if ((unsigned char)ch < 128 && ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
-    for (auto& [pos, w, cat] : ac_match(scan_text)) {
-      (void)pos;
-      bool covered = false;
-      for (auto& e : ex.entities)
-        if (e.surface.find(w) != std::string::npos) { covered = true; break; }
-      if (covered) continue;
-      bool dup = false;
-      for (auto& k : ex.keywords)
-        if (k.word == w) { dup = true; break; }
-      if (!dup) ex.keywords.push_back({w, cat});
-    }
-  }
-
-  // ---- 英文自由词元（通用锚点，供英文语料提取；与中文词典互补）----
-  // 伪代码：
-  //   步骤1：线性扫描做 ASCII 词切分（isalnum 连续段），跟踪句首标志
-  //          （'.'/'!'/'?' 后置位，词后清零）；
-  //   步骤2：非句首的首字母大写词（长度≥2）→ person 实体（专名启发式），去重；
-  //          连续大写词（仅空格分隔）合并为复合专名（"New York" 不拆成两个实体）；
-  //   步骤3：其余长度≥4 且不在英文停用词表的词 → 小写化后作 attr 类关键词，
-  //          已被提取为实体的词跳过，去重。
-  {
-    static const std::unordered_set<std::string> kEnStop = {
-        "this", "that", "with", "have", "from", "they", "them", "what", "when",
-        "where", "which", "there", "their", "would", "could", "should", "about",
-        "just", "like", "know", "really", "yeah", "okay", "well", "then", "than",
-        "some", "into", "over", "such", "only", "also", "very", "much", "been"};
-    bool sent_start = true;
-    size_t prev_end = 0;     // 上一个词元结束位置
-    bool prev_cap = false;   // 上一个词元是否大写开头
-    size_t i = 0;
-    while (i < text.size()) {
-      unsigned char c = (unsigned char)text[i];
-      if (c < 128 && std::isalpha(c)) {
-        size_t j = i;
-        while (j < text.size() && (unsigned char)text[j] < 128 &&
-               std::isalnum((unsigned char)text[j]))
-          ++j;
-        std::string tok = text.substr(i, j - i);
-        std::string low;
-        for (char ch : tok) low += (char)std::tolower((unsigned char)ch);
-        bool cap = std::isupper((unsigned char)tok[0]) != 0;
-        // 复合专名合并：上一个词元大写、本词元大写、中间仅空格 → 并入上一个实体
-        bool merged = false;
-        if (cap && prev_cap && i > prev_end && i - prev_end <= 2 &&
-            !ex.entities.empty()) {
-          std::string& last = ex.entities.back().surface;
-          std::string joiner = text.substr(prev_end, i - prev_end);
-          if (joiner.find_first_not_of(' ') == std::string::npos) {
-            last += joiner + tok;
-            merged = true;
-          }
-        }
-        if (merged) {
-          // 已并入复合实体
-        } else if (cap && tok.size() >= 2 && !sent_start && low != "i") {
-          bool dup = false;
-          for (auto& e : ex.entities)
-            if (e.surface == tok) { dup = true; break; }
-          if (!dup) ex.entities.push_back({tok, "人物", "person", {}});
-        } else if (tok.size() >= 4 && !kEnStop.count(low)) {
-          bool dup = false;
-          for (auto& e : ex.entities) {
-            std::string elow;
-            for (char ch : e.surface) elow += (char)std::tolower((unsigned char)ch);
-            if (elow == low) { dup = true; break; }
-          }
-          for (auto& k : ex.keywords)
-            if (k.word == low) { dup = true; break; }
-          if (!dup) ex.keywords.push_back({low, "attr"});
-        }
-        prev_cap = cap;
-        prev_end = j;
-        sent_start = false;
-        i = j;
-      } else {
-        if (c == '.' || c == '!' || c == '?') sent_start = true;
-        ++i;
-      }
-    }
-  }
-
-  // ---- 事件类型：取第一个 action 关键词 ----
-  for (auto& k : ex.keywords)
-    if (k.category == "action") { ex.event.type = k.word; break; }
-
-  // ---- 时间词：昨天/今天/前天/去年/上个月/深夜... ----
-  TimePoint now = TimeService::now_utc();
-  if (contains_at(text, "前天", nullptr)) {
-    ex.event.time = now - 2 * 86400; ex.event.precision = Precision::Day;
-  } else if (contains_at(text, "昨天", nullptr)) {
-    ex.event.time = now - 86400; ex.event.precision = Precision::Day;
-  } else if (contains_at(text, "今天", nullptr)) {
-    ex.event.time = now; ex.event.precision = Precision::Day;
-  } else if (contains_at(text, "上个月", nullptr)) {
-    ex.event.time = now - 30LL * 86400; ex.event.precision = Precision::Month;
-  } else if (contains_at(text, "去年", nullptr)) {
-    ex.event.time = now - 365LL * 86400; ex.event.precision = Precision::Year;
-  } else {
-    ex.event.time = now; ex.event.precision = Precision::Day;
-  }
+  // Stage order is part of the matching contract: entities cover dictionary terms,
+  // then AC terms deduplicate against the dictionary, before English token handling.
+  extract_honorific(text, "老", ex);
+  extract_honorific(text, "小", ex);
+  extract_objects(text, ex);
+  extract_dictionary_keywords(text, kw_dict_, ex);
+  if (ac_built_) extract_ac_keywords(*this, text, ex);
+  extract_english(text, ex);
+  extract_event_metadata(text, ex);
   return ex;
 }
 

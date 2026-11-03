@@ -113,9 +113,51 @@ static void test_slots_profile() {
   CHECK(er.put_slot("no-such-uid", "job", "x", 1, "e") == Err::NotFound);
 }
 
+static void test_resolution_priority_and_creation() {
+  Storage storage;
+  VectorService vectors(&storage);
+  EntityResolver resolver(storage, vectors);
+  auto first = resolver.register_entity("person", "same", {{"phone", "1"}});
+  auto second = resolver.register_entity("person", "other", {{"phone", "2"}}, {"same"});
+  auto explicit_uid = resolver.resolve("surface", {}, {{"uid", first}, {"phone", "2"}});
+  CHECK(explicit_uid.uid == first && explicit_uid.confidence == 1.0);
+  auto fallback = resolver.resolve("surface", {}, {{"uid", "missing"}, {"phone", "2"}});
+  CHECK(fallback.uid == second && !fallback.is_new);
+  // A name match takes precedence over another entity's alias.
+  auto by_name = resolver.resolve("same");
+  CHECK(by_name.uid == first && by_name.pending && by_name.candidates.size() == 1);
+  auto created = resolver.resolve("new name");
+  CHECK(created.is_new && created.confidence == 0.3);
+  const Edge* mention = storage.find_edge(created.mention_uid, created.uid, RelType::REFERS_TO);
+  CHECK(mention && mention->weight == 1.0);
+}
+
+static void test_candidate_order_and_score_clamping() {
+  Storage storage;
+  VectorService vectors(&storage);
+  EntityResolver resolver(storage, vectors);
+  auto first = resolver.register_entity("person", "shared");
+  auto second = resolver.register_entity("person", "shared");
+  auto tied = resolver.resolve("shared");
+  CHECK(tied.is_new && tied.suspected_dup);
+  CHECK(storage.get_node(tied.uid)->attrs.at("suspected_dup_of") == first);
+  ResolveContext context;
+  for (int i = 0; i < 4; ++i) {
+    auto peer = resolver.register_entity("person", "peer" + std::to_string(i));
+    context.co_entity_uids.push_back(peer);
+    storage.put_edge(Edge{second, peer, RelType::EXPERIENCED_TOGETHER, 1.0, {}});
+    if (i < 3) storage.put_edge(Edge{first, peer, RelType::EXPERIENCED_TOGETHER, 1.0, {}});
+  }
+  auto result = resolver.resolve("shared", context);
+  // Both original candidates score above 1; compare raw scores before clamping.
+  CHECK(result.uid == second && result.confidence == 1.0 && !result.pending);
+}
+
 int main() {
   test_resolve_three_branches();
   test_merge_split_alias();
   test_slots_profile();
+  test_resolution_priority_and_creation();
+  test_candidate_order_and_score_clamping();
   return AME_TEST_REPORT();
 }

@@ -239,6 +239,86 @@ static void test_name_alias_bridge() {
   CHECK(!extra_kw);
 }
 
+static void put_event(Storage& storage, const std::string& uid, const std::string& text) {
+  Node event;
+  event.uid = uid;
+  event.kind = NodeKind::Event;
+  event.text = text;
+  storage.put_node(event);
+}
+
+static void test_lexical_weight_and_source_precedence() {
+  Fixture f;
+  f.kw.add_alias("painting", "paint");
+  put_event(f.s, "ev", "paint painting");
+  SeedQuery q;
+  q.text = "paint";
+  q.uid = "ev";
+  q.soft_min_sim = 2;
+  auto seeds = f.sg.gen_seeds(q);
+  CHECK(seeds.size() == 1);
+  CHECK(seeds[0].source == "lex");
+  CHECK_NEAR(seeds[0].weight, 1.42, 1e-12);  // Lexical weights are not clamped to 1.
+  q.conditional_normalize = true;
+  seeds = f.sg.gen_seeds(q);
+  CHECK(seeds.size() == 1 && seeds[0].source == "hard");
+  CHECK_NEAR(seeds[0].weight, 1, 1e-12);
+  q.text = "paint painting";
+  seeds = f.sg.gen_seeds(q);
+  CHECK(seeds.size() == 1 && seeds[0].source == "hard");  // Equal weight keeps first source.
+}
+
+static void test_lexical_discount_and_topk() {
+  Fixture f;
+  f.kw.add_alias("painting", "paint");
+  f.kw.add_near("walk", "stroll", 0.9);
+  put_event(f.s, "strong", "painting");
+  put_event(f.s, "near", "stroll");
+  SeedQuery q;
+  q.text = "paint";
+  q.conditional_normalize = true;
+  q.soft_min_sim = 2;
+  auto strong = f.sg.gen_seeds(q);
+  CHECK(strong.size() == 1 && strong[0].node_uid == "strong");
+  CHECK_NEAR(strong[0].weight, 0.3 + 0.7 * 0.6 * std::log(2.0) / std::log(3.0), 1e-12);
+  q.text = "walk";
+  auto near = f.sg.gen_seeds(q);
+  CHECK(near.size() == 1 && near[0].node_uid == "near");
+  CHECK_NEAR(near[0].weight, 0.3 + 0.7 * 0.4 * std::log(2.0) / std::log(3.0), 1e-12);
+  put_event(f.s, "museum-a", "museum");
+  put_event(f.s, "museum-z", "museum");
+  q.text = "museum";
+  q.lex_topk = 1;
+  auto ranked = f.sg.gen_seeds(q);
+  CHECK(ranked.size() == 1 && ranked[0].node_uid == "museum-z");
+  q.lex_topk = 0;
+  CHECK(f.sg.gen_seeds(q).empty());
+}
+
+static void test_cjk_fallback_and_channel_priority() {
+  Fixture f;
+  SeedGenerator without_extractor(f.s, f.vs, f.kw, nullptr);
+  put_event(f.s, "full", "山林湖泊 museum");
+  put_event(f.s, "single-gram", "山林");
+  SeedQuery q;
+  q.text = "山林湖泊";
+  q.soft_min_sim = 2;
+  auto seeds = without_extractor.gen_seeds(q);
+  CHECK(seeds.size() == 1 && seeds[0].node_uid == "full");
+  CHECK_NEAR(seeds[0].weight, 1, 1e-12);
+  q.text = "山";
+  CHECK(without_extractor.gen_seeds(q).size() == 2);  // Single-codepoint fallback.
+  q.text = "museum 山林湖泊";
+  q.lex_topk = 0;
+  seeds = without_extractor.gen_seeds(q);
+  CHECK(seeds.size() == 1 && seeds[0].node_uid == "full");  // ASCII topk does not cap CJK.
+  q.text = "压力 山林湖泊";
+  CHECK(f.sg.gen_seeds(q).empty());  // A dictionary CJK term disables the gram fallback.
+  Fixture empty;
+  q.text = "museum 山林湖泊";
+  CHECK(empty.sg.gen_seeds(q).empty());
+}
+
 int main() {
   test_hard_seeds();
   test_soft_seeds();
@@ -247,5 +327,8 @@ int main() {
   test_lex_seeds();
   test_conditional_normalize();
   test_name_alias_bridge();
+  test_lexical_weight_and_source_precedence();
+  test_lexical_discount_and_topk();
+  test_cjk_fallback_and_channel_priority();
   return AME_TEST_REPORT();
 }

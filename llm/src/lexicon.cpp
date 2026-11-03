@@ -1,15 +1,11 @@
 /*
- * 所属模块：llm 接入层——词典蒸馏（bench 词典构建器）。
- * 本文件主体思路：从词频表取高频内容词，批量调 LLM（关思考，JSON 输出）蒸馏
- *   synonyms/antonyms/related，产出版本化 lexicon.json；宽容解析 + 失败批重试。
- *   人名等专有名词由 prompt 约定返回空词条（实体走实体通道，不进词典）。
- * 关键算法/数据结构：50 词/批；复用 components.cpp 的截断抢救解析思路（此处对象级）。
- * 依赖关系：依赖 llm.h（ILlmClient）、core(json/log)；被 bench CLI 依赖。
+ * llm 词典蒸馏：批量请求、宽容解析和一次空响应重试。
+ * pair 可以跨 chunk；完整处理一个 word 后才写入完成检查点。
+ * 中断时未完成的 word 在续跑时重新处理，客户端缓存可复用此前请求。
  */
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
-#include <iomanip>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -20,543 +16,533 @@
 #include "ame/llm/components.h"
 
 namespace ame {
+namespace {
+using WordSet = std::unordered_set<std::string>;
+using KeptPairs = std::unordered_map<std::string, WordSet>;
+using PairScores = std::unordered_map<std::string, double>;
+using WordScores = std::unordered_map<std::string, PairScores>;
+constexpr size_t kChunkBatches = 100;
+constexpr int kValidationCheckpointVersion = 2;
 
-// 词典单条：word + 同义/反义/强关联
-struct LexEntry {
-  std::string word;
-  std::vector<std::string> synonyms;
-  std::vector<std::string> antonyms;
-  std::vector<std::pair<std::string, double>> related;  // (word, score)
+static std::string string_field(const Json& value, const char* key) {
+  const Json* field = value.find(key);
+  return field ? field->as_str() : "";
+}
+
+static bool read_json(const std::string& path, Json& value) {
+  std::ifstream input(path);
+  if (!input) return false;
+  std::stringstream contents;
+  contents << input.rdbuf();
+  bool ok = false;
+  const Json parsed = Json::parse(contents.str(), &ok);
+  value = ok ? parsed : Json{};
+  return ok;
+}
+
+// Linux rename 可原子覆盖；写失败时保留原检查点。
+static bool write_json(const std::string& path, const Json& value) {
+  std::ofstream output(path + ".tmp", std::ios::binary | std::ios::trunc);
+  output << value.dump();
+  output.close();
+  if (!output) return false;
+  return std::rename((path + ".tmp").c_str(), path.c_str()) == 0;
+}
+
+static Json parse_response(const std::string& response, Json::Kind kind) {
+  const char open = kind == Json::Arr ? '[' : '{';
+  const char close = kind == Json::Arr ? ']' : '}';
+  const size_t begin = response.find(open), end = response.rfind(close);
+  if (begin == std::string::npos || end == std::string::npos || end <= begin) return {};
+  bool ok = false;
+  Json value = Json::parse(response.substr(begin, end - begin + 1), &ok);
+  return ok && value.kind == kind ? value : Json{};
+}
+
+static std::vector<std::string> chat_with_retry(
+    ILlmClient& client, const std::vector<ChatRequest>& requests, int concurrency) {
+  auto responses = client.chat_batch(requests, concurrency);
+  responses.resize(requests.size());
+  std::vector<size_t> retry_indices;
+  std::vector<ChatRequest> retry_requests;
+  for (size_t i = 0; i < responses.size(); ++i) {
+    if (!responses[i].empty()) continue;
+    retry_indices.push_back(i);
+    retry_requests.push_back(requests[i]);
+  }
+  if (retry_requests.empty()) return responses;
+  auto retried = client.chat_batch(retry_requests, concurrency);
+  retried.resize(retry_indices.size());
+  for (size_t i = 0; i < retry_indices.size(); ++i) responses[retry_indices[i]] = retried[i];
+  return responses;
+}
+
+static ChatRequest json_request(const std::string& system, std::string user) {
+  ChatOptions options;
+  options.json = true;
+  options.max_tokens = 4096;
+  return {{{"system", system}, {"user", std::move(user)}}, options};
+}
+
+// 词条按 word 更新，避免旧文件或重复模型结果产生重复条目。
+struct EntryStore {
+  Json entries = Json::array();
+  std::unordered_map<std::string, size_t> positions;
+
+  bool contains(const std::string& word) const { return positions.count(word) != 0; }
+
+  void put(const Json& entry) {
+    const std::string word = string_field(entry, "word");
+    const auto existing = positions.find(word);
+    if (!word.empty() && existing != positions.end()) {
+      entries.arr[existing->second] = entry;
+      return;
+    }
+    if (!word.empty()) positions[word] = entries.arr.size();
+    entries.push(entry);
+  }
 };
 
-// 词频表读取伪代码：支持多个词频文件（{"conv_vocab_top":[[w,f]...],...} 结构），
-//   合并词频（同词跨文件取频次和）后按频次降序取 top_n。
-static std::vector<std::string> top_vocab(const std::vector<std::string>& vocab_paths,
-                                          int top_n) {
-  std::unordered_map<std::string, double> freq;
-  for (auto& vocab_path : vocab_paths) {
-    std::ifstream f(vocab_path);
-    if (!f) continue;
-    std::stringstream ss;
-    ss << f.rdbuf();
-    bool ok = false;
-    Json j = Json::parse(ss.str(), &ok);
-    if (!ok) continue;
-    for (const char* key : {"conv_vocab_top", "question_vocab_top"}) {
-      const Json* arr = j.find(key);
-      if (!arr) continue;
-      for (auto& pair : arr->arr) {
-        if (pair.arr.size() < 2) continue;
-        std::string w = pair.arr[0].as_str();
-        // 过滤：含撇号的缩略形式/过短词不蒸馏
-        if (w.size() < 3 || w.find('\'') != std::string::npos) continue;
-        freq[w] += pair.arr[1].as_num();
-      }
-    }
+static EntryStore load_entries(const Json& root, const WordSet& ignore = {}) {
+  EntryStore result;
+  const Json* entries = root.find("entries");
+  if (!entries) return result;
+  for (const auto& entry : entries->arr) {
+    if (ignore.count(string_field(entry, "word"))) continue;
+    result.put(entry);
   }
-  if (freq.empty()) return {};
-  std::vector<std::pair<double, std::string>> v;
-  for (auto& [w, f2] : freq) v.emplace_back(f2, w);
-  std::sort(v.begin(), v.end(), std::greater<>());
-  std::vector<std::string> out;
-  for (size_t i = 0; i < v.size() && (int)i < top_n; ++i) out.push_back(v[i].second);
-  return out;
+  return result;
 }
 
-// 词条解析伪代码：逐词取 syn_strong/syn_near/antonyms（兼容旧版 synonyms/related 字段），
-//   缺失按空处理（宽容）。
-static LexEntry parse_entry(const std::string& word, const Json& j) {
-  LexEntry e;
-  e.word = word;
-  auto list_of_str = [&](const Json* arr) {
-    std::vector<std::string> out;
-    if (arr)
-      for (auto& s : arr->arr) out.push_back(s.as_str());
-    return out;
-  };
-  e.synonyms = list_of_str(j.find("syn_strong"));
-  if (e.synonyms.empty()) e.synonyms = list_of_str(j.find("synonyms"));  // 旧版兼容
-  e.antonyms = list_of_str(j.find("antonyms"));
-  const Json* near = j.find("syn_near");
-  if (!near) near = j.find("related");  // 旧版 related 视作近义
-  if (near) {
-    for (auto& r : near->arr) {
-      const Json* w = r.find("word");
-      const Json* s = r.find("score");
-      if (w) e.related.emplace_back(w->as_str(), s ? s->as_num(0.5) : 0.5);
-    }
-  }
-  return e;
+static WordSet entry_words(const Json& entries) {
+  WordSet words;
+  for (const auto& entry : entries.arr) words.insert(string_field(entry, "word"));
+  return words;
 }
 
-// 词条序列化辅助（三分流格式：syn_strong/syn_near/antonyms）
-static Json entry_to_json(const LexEntry& e) {
-  Json je = Json::object();
-  je["word"] = Json::string(e.word);
-  Json js = Json::array();
-  for (auto& s : e.synonyms) js.push(Json::string(s));
-  je["syn_strong"] = std::move(js);
-  Json ja = Json::array();
-  for (auto& s : e.antonyms) ja.push(Json::string(s));
-  je["antonyms"] = std::move(ja);
-  Json jr = Json::array();
-  for (auto& [w, sc] : e.related) {
-    Json r = Json::object();
-    r["word"] = Json::string(w);
-    r["score"] = Json::number(sc);
-    jr.push(std::move(r));
+static void add_vocab_frequencies(const Json* values, PairScores& frequencies) {
+  if (!values) return;
+  for (const auto& pair : values->arr) {
+    if (pair.arr.size() < 2) continue;
+    const std::string word = pair.arr[0].as_str();
+    if (word.size() < 3 || word.find('\'') != std::string::npos) continue;
+    frequencies[word] += pair.arr[1].as_num();
   }
-  je["syn_near"] = std::move(jr);
-  return je;
 }
 
-// 整表落盘辅助：version/top_n + entries 数组
-static void write_lexicon(const std::string& out_path, int top_n, const Json& entries) {
+static std::vector<std::string> top_vocab(const std::vector<std::string>& paths, int top_n) {
+  PairScores frequencies;
+  for (const auto& path : paths) {
+    Json root;
+    if (!read_json(path, root)) continue;
+    add_vocab_frequencies(root.find("conv_vocab_top"), frequencies);
+    add_vocab_frequencies(root.find("question_vocab_top"), frequencies);
+  }
+  std::vector<std::pair<double, std::string>> ranked;
+  for (const auto& [word, frequency] : frequencies) ranked.emplace_back(frequency, word);
+  std::sort(ranked.begin(), ranked.end(), std::greater<>());
+  std::vector<std::string> words;
+  for (size_t i = 0; i < ranked.size() && static_cast<int>(i) < top_n; ++i)
+    words.push_back(ranked[i].second);
+  return words;
+}
+
+static Json string_array(const Json* source) {
+  Json result = Json::array();
+  if (!source) return result;
+  for (const auto& value : source->arr) result.push(Json::string(value.as_str()));
+  return result;
+}
+
+static Json near_array(const Json& entry) {
+  const Json* near = entry.find("syn_near");
+  if (!near) near = entry.find("related");
+  Json result = Json::array();
+  if (!near) return result;
+  for (const auto& relation : near->arr) {
+    const Json* word = relation.find("word");
+    if (!word) continue;
+    const Json* score = relation.find("score");
+    Json item = Json::object();
+    item["word"] = Json::string(word->as_str());
+    item["score"] = Json::number(score ? score->as_num(0.5) : 0.5);
+    result.push(std::move(item));
+  }
+  return result;
+}
+
+static Json normalize_entry(const std::string& word, const Json& entry) {
+  Json result = Json::object();
+  result["word"] = Json::string(word);
+  Json strong = string_array(entry.find("syn_strong"));
+  if (strong.arr.empty()) strong = string_array(entry.find("synonyms"));
+  result["syn_strong"] = std::move(strong);
+  result["antonyms"] = string_array(entry.find("antonyms"));
+  result["syn_near"] = near_array(entry);
+  return result;
+}
+
+static bool write_lexicon(const std::string& path, int top_n, const EntryStore& entries) {
   Json root = Json::object();
   root["version"] = Json::string("v1");
   root["top_n"] = Json::number(top_n);
-  root["entries"] = entries;
-  std::ofstream f(out_path + ".tmp", std::ios::binary | std::ios::trunc);
-  f << root.dump();
-  f.close();
-  std::remove(out_path.c_str());  // Windows rename 不可覆盖已存在目标，先删再改名
-  std::rename((out_path + ".tmp").c_str(), out_path.c_str());  // 原子落盘
+  root["entries"] = entries.entries;
+  return write_json(path, root);
 }
 
-// build_lexicon_json（增量模式）伪代码：
-//   步骤1：读 out_path 已有词条（断点续跑），建立已蒸馏词集合；读词频表取 top_n；
-//   步骤2：过滤掉已蒸馏词，剩余按 batch 分批构造 prompt
-//         （专有人名/地名返回空词条；词表文件结构任意词频表均可，与具体数据集无关）；
-//   步骤3：chat_batch 并发调用；失败批单批重试一次；
-//   步骤4：每批解析后立即合并进 entries 并整表落盘（中断不丢已蒸馏部分）；
-//   步骤5：返回本次新增词条数；打印覆盖率（已蒸馏/目标词表）。
+static ChatRequest build_words_request(const std::vector<std::string>& words,
+                                       size_t begin, size_t end) {
+  std::string user = "为下列每个英文词生成词典条目。输出 JSON 对象：词为键，值为 "
+                     "{\"syn_strong\":[同义词，含词形变化如 painting→paint], "
+                     "\"syn_near\":[{\"word\":近义/上下位/强关联词,\"score\":0~1}], "
+                     "\"antonyms\":[反义词]}。"
+                     "syn_strong 只放可互换的真同义；近义但不可互换的放 syn_near。"
+                     "专有名词（人名/地名/品牌）返回空词条。只输出 JSON。\n词表：\n";
+  for (size_t i = begin; i < end; ++i) user += words[i] + "\n";
+  return json_request("你是词典编纂器，严格输出 JSON。", std::move(user));
+}
+
+static std::vector<ChatRequest> build_words_chunk(const std::vector<std::string>& words,
+                                                size_t begin, size_t end, size_t batch) {
+  std::vector<ChatRequest> requests;
+  for (size_t i = begin; i < end; i += batch)
+    requests.push_back(build_words_request(words, i, std::min(i + batch, end)));
+  return requests;
+}
+
+static int merge_generated_entries(const std::vector<std::string>& responses,
+                                   EntryStore& output, int& failed_batches) {
+  int added = 0;
+  for (const auto& response : responses) {
+    const Json object = parse_response(response, Json::Obj);
+    if (object.kind != Json::Obj) { ++failed_batches; continue; }
+    for (const auto& [word, value] : object.obj) {
+      if (!output.contains(word)) ++added;
+      output.put(normalize_entry(word, value));
+    }
+  }
+  return added;
+}
+
+struct PairItem { std::string word, other; };
+struct PairSpan { size_t begin, end; };
+struct PairWork {
+  std::vector<PairItem> pairs;
+  std::unordered_map<std::string, size_t> completion_end;
+
+  void add(const std::string& word, const std::vector<std::string>& candidates) {
+    if (candidates.empty()) return;
+    for (const auto& candidate : candidates) pairs.push_back({word, candidate});
+    completion_end[word] = pairs.size();
+  }
+
+  bool complete(const std::string& word, size_t processed_end) const {
+    const auto end = completion_end.find(word);
+    return end != completion_end.end() && end->second <= processed_end;
+  }
+};
+
+static std::vector<std::string> strong_candidates(const Json& entry) {
+  std::vector<std::string> result;
+  const Json* strong = entry.find("syn_strong");
+  if (!strong) return result;
+  for (const auto& candidate : strong->arr) {
+    const std::string word = candidate.as_str();
+    if (!word.empty()) result.push_back(word);
+  }
+  return result;
+}
+
+static void add_unique_candidate(std::vector<std::string>& words, WordSet& seen,
+                                 const std::string& word) {
+  if (!word.empty() && seen.insert(word).second) words.push_back(word);
+}
+
+static std::vector<std::string> score_candidates(const Json& entry) {
+  std::vector<std::string> result;
+  WordSet seen;
+  for (const auto& candidate : strong_candidates(entry)) add_unique_candidate(result, seen, candidate);
+  const Json* near = entry.find("syn_near");
+  if (!near) return result;
+  for (const auto& relation : near->arr)
+    add_unique_candidate(result, seen, string_field(relation, "word"));
+  return result;
+}
+
+static PairWork validation_work(const Json& entries, const EntryStore& completed) {
+  PairWork work;
+  WordSet seen;
+  for (const auto& entry : entries.arr) {
+    const std::string word = string_field(entry, "word");
+    if (word.empty() || completed.contains(word) || !seen.insert(word).second) continue;
+    work.add(word, strong_candidates(entry));
+  }
+  return work;
+}
+
+static bool has_all_scores(const Json* row, const std::vector<std::string>& candidates) {
+  if (!row || row->kind != Json::Obj) return false;
+  for (const auto& word : candidates) {
+    const Json* score = row->find(word);
+    if (!score || score->kind != Json::Num) return false;
+  }
+  return true;
+}
+
+static PairWork scoring_work(const Json& entries, const Json& completed) {
+  PairWork work;
+  WordSet seen;
+  for (const auto& entry : entries.arr) {
+    const std::string word = string_field(entry, "word");
+    if (word.empty() || !seen.insert(word).second) continue;
+    auto candidates = score_candidates(entry);
+    if (!has_all_scores(completed.find(word), candidates)) work.add(word, candidates);
+  }
+  return work;
+}
+
+enum class PairMode { Validate, Score };
+
+static ChatRequest build_pair_request(const PairWork& work, PairSpan span, PairMode mode) {
+  const bool validate = mode == PairMode::Validate;
+  std::string user = validate
+      ? "You are a strict synonym validator. For each pair A|B below, answer: in most "
+        "sentences, can A be directly replaced by B without changing the meaning? "
+        "Reply with a JSON array only: [{\"a\":A,\"b\":B,\"ok\":true/false},...] "
+        "covering every pair in order.\nPairs:\n"
+      : "Rate semantic similarity of each pair A|B for conversational English on a "
+        "1-10 scale (10=interchangeable synonyms, 7-9=highly similar usually "
+        "replaceable, 4-6=related but usually not replaceable, 1-3=weakly related). "
+        "Reply with a JSON array only: [{\"a\":A,\"b\":B,\"score\":N},...] covering "
+        "every pair in order.\nPairs:\n";
+  for (size_t i = span.begin; i < span.end; ++i)
+    user += work.pairs[i].word + "|" + work.pairs[i].other + "\n";
+  return json_request(validate ? "你是严格的同义词校验器，只输出 JSON。"
+                               : "你是严格的语义近似评分器，只输出 JSON。", std::move(user));
+}
+
+struct PairChunk {
+  std::vector<ChatRequest> requests;
+  std::vector<PairSpan> spans;
+};
+
+static PairChunk build_pair_chunk(const PairWork& work, size_t begin, size_t end,
+                                  size_t batch, PairMode mode) {
+  PairChunk chunk;
+  for (size_t i = begin; i < end; i += batch) {
+    const PairSpan span{i, std::min(i + batch, end)};
+    chunk.spans.push_back(span);
+    chunk.requests.push_back(build_pair_request(work, span, mode));
+  }
+  return chunk;
+}
+
+static WordSet kept_verdicts(const Json& array) {
+  WordSet kept;
+  for (const auto& verdict : array.arr) {
+    const Json* a = verdict.find("a"), *b = verdict.find("b"), *ok = verdict.find("ok");
+    if (!a || !b || !ok) continue;
+    if (ok->as_bool()) kept.insert(a->as_str() + "|" + b->as_str());
+  }
+  return kept;
+}
+
+static bool merge_validation_batch(const std::string& response, const PairWork& work,
+                                   PairSpan span, KeptPairs& kept) {
+  const Json array = parse_response(response, Json::Arr);
+  const bool parsed = array.kind == Json::Arr;
+  const WordSet verdicts = kept_verdicts(array);
+  for (size_t i = span.begin; i < span.end; ++i) {
+    const auto& pair = work.pairs[i];
+    // 无法解析时 fail-open；有效数组内缺失或 false 的判定仍按原策略剔除。
+    if (!parsed || verdicts.count(pair.word + "|" + pair.other)) kept[pair.word].insert(pair.other);
+  }
+  return !parsed;
+}
+
+static Json validated_entry(const Json& source, const WordSet& kept) {
+  Json result = Json::object();
+  result["word"] = Json::string(string_field(source, "word"));
+  Json strong = Json::array();
+  for (const auto& candidate : strong_candidates(source))
+    if (kept.count(candidate)) strong.push(Json::string(candidate));
+  result["syn_strong"] = std::move(strong);
+  result["antonyms"] = string_array(source.find("antonyms"));
+  const Json* near = source.find("syn_near");
+  result["syn_near"] = near && near->kind == Json::Arr ? *near : Json::array();
+  return result;
+}
+
+static void commit_validated_words(const Json& entries, const PairWork& work, size_t end,
+                                   KeptPairs& kept, EntryStore& output) {
+  for (const auto& entry : entries.arr) {
+    const std::string word = string_field(entry, "word");
+    if (output.contains(word) || !work.complete(word, end)) continue;
+    output.put(validated_entry(entry, kept[word]));
+    kept.erase(word);
+  }
+}
+
+static EntryStore load_validation_checkpoint(const std::string& path, const Json& entries) {
+  Json root;
+  read_json(path, root);
+  const Json* version = root.find("checkpoint_version");
+  if (version && version->as_num() == kValidationCheckpointVersion) return load_entries(root);
+  // 旧格式无法区分已拒绝与未处理的 pair，当前输入词必须重验；保留无关历史词。
+  return load_entries(root, entry_words(entries));
+}
+
+static bool write_validation_checkpoint(const std::string& path, const EntryStore& output) {
+  Json root = Json::object();
+  root["version"] = Json::string("v1");
+  root["source"] = Json::string("distilled");
+  root["validated"] = Json::boolean(true);
+  root["checkpoint_version"] = Json::number(kValidationCheckpointVersion);
+  root["entries"] = output.entries;
+  return write_json(path, root);
+}
+
+static void carry_forward_entries(const Json& entries, EntryStore& output) {
+  for (const auto& entry : entries.arr) {
+    const std::string word = string_field(entry, "word");
+    if (word.empty() || output.contains(word)) continue;
+    output.put(entry);
+  }
+}
+
+static PairScores parsed_scores(const Json& array) {
+  PairScores scores;
+  for (const auto& item : array.arr) {
+    const Json* a = item.find("a"), *b = item.find("b"), *score = item.find("score");
+    if (!a || !b || !score) continue;
+    scores[a->as_str() + "|" + b->as_str()] = score->as_num(5.0);
+  }
+  return scores;
+}
+
+static double pair_score(const PairScores& scores, const PairItem& pair) {
+  auto score = scores.find(pair.word + "|" + pair.other);
+  if (score != scores.end()) return score->second;
+  score = scores.find(pair.other);
+  return score == scores.end() ? 5.0 : score->second;
+}
+
+static bool merge_score_batch(const std::string& response, const PairWork& work,
+                              PairSpan span, WordScores& output) {
+  const Json array = parse_response(response, Json::Arr);
+  const PairScores scores = parsed_scores(array);
+  for (size_t i = span.begin; i < span.end; ++i) {
+    const auto& pair = work.pairs[i];
+    output[pair.word][pair.other] = pair_score(scores, pair);
+  }
+  return array.kind != Json::Arr;
+}
+
+static Json normalized_scores(const PairScores& scores) {
+  Json row = Json::object();
+  for (const auto& [word, score] : scores) row[word] = Json::number(score / 10.0);
+  return row;
+}
+
+static void commit_scored_words(const PairWork& work, size_t end, WordScores& scores, Json& output) {
+  for (auto word = scores.begin(); word != scores.end();) {
+    if (!work.complete(word->first, end)) { ++word; continue; }
+    output[word->first] = normalized_scores(word->second);
+    word = scores.erase(word);
+  }
+}
+
+static Json load_score_checkpoint(const std::string& path) {
+  Json root;
+  read_json(path, root);
+  const Json* scores = root.find("sims");
+  return scores && scores->kind == Json::Obj ? *scores : Json::object();
+}
+
+static bool write_score_checkpoint(const std::string& path, const Json& scores) {
+  Json root = Json::object();
+  root["source"] = Json::string("distilled-sim");
+  root["sims"] = scores;
+  return write_json(path, root);
+}
+
+}  // namespace
+
 int build_lexicon_json(ILlmClient& client, const std::vector<std::string>& vocab_paths,
                        const std::string& out_path, int top_n, int batch, int concurrency) {
-  Json entries = Json::array();
-  std::unordered_set<std::string> have;
-  {
-    std::ifstream f(out_path);
-    if (f) {
-      std::stringstream ss;
-      ss << f.rdbuf();
-      bool ok = false;
-      Json old = Json::parse(ss.str(), &ok);
-      if (ok) {
-        const Json* es = old.find("entries");
-        if (es)
-          for (auto& e : es->arr) {
-            entries.push(e);
-            const Json* w = e.find("word");
-            if (w) have.insert(w->as_str());
-          }
-      }
-    }
-  }
-  auto words_all = top_vocab(vocab_paths, top_n);
-  if (words_all.empty()) return -1;
+  if (batch <= 0) return -1;
+  Json previous;
+  read_json(out_path, previous);
+  EntryStore output = load_entries(previous);
+  const auto all_words = top_vocab(vocab_paths, top_n);
+  if (all_words.empty()) return -1;
   std::vector<std::string> words;
-  for (auto& w : words_all)
-    if (!have.count(w)) words.push_back(w);
-  AME_LOGI("lexicon: 目标 ", words_all.size(), " 词，已蒸馏 ", have.size(),
-           "，本次新增 ", words.size());
-  if (words.empty()) {
-    write_lexicon(out_path, top_n, entries);
-    return 0;
+  for (const auto& word : all_words)
+    if (!output.contains(word)) words.push_back(word);
+  int added = 0, failed_batches = 0;
+  const size_t chunk_size = static_cast<size_t>(batch) * kChunkBatches;
+  for (size_t begin = 0; begin < words.size(); begin += chunk_size) {
+    const size_t end = std::min(begin + chunk_size, words.size());
+    const auto requests = build_words_chunk(words, begin, end, batch);
+    added += merge_generated_entries(chat_with_retry(client, requests, concurrency), output, failed_batches);
+    if (!write_lexicon(out_path, top_n, output)) return -1;
+    AME_LOGI("lexicon: 进度 ", end, "/", words.size(), " 词，失败批 ", failed_batches);
   }
-
-  // 分块处理（每 100 批一轮：chat_batch → 解析 → 落盘），真断点续跑 + 进度可见 +
-  // 失败隔离；缓存保证重跑零重复扣费。
-  std::vector<std::vector<std::string>> batches;
-  for (size_t i = 0; i < words.size(); i += (size_t)batch)
-    batches.emplace_back(words.begin() + i, words.begin() + std::min(i + (size_t)batch, words.size()));
-  const size_t kChunk = 100;
-  int got = 0, failed_batches = 0;
-  for (size_t c0 = 0; c0 < batches.size(); c0 += kChunk) {
-    size_t c1 = std::min(c0 + kChunk, batches.size());
-    std::vector<ChatRequest> reqs;
-    for (size_t i = c0; i < c1; ++i) {
-      std::string user = "为下列每个英文词生成词典条目。输出 JSON 对象：词为键，值为 "
-                         "{\"syn_strong\":[同义词，含词形变化如 painting→paint], "
-                         "\"syn_near\":[{\"word\":近义/上下位/强关联词,\"score\":0~1}], "
-                         "\"antonyms\":[反义词]}。"
-                         "syn_strong 只放可互换的真同义；近义但不可互换的放 syn_near。"
-                         "专有名词（人名/地名/品牌）返回空词条。只输出 JSON。\n词表：\n";
-      for (auto& w : batches[i]) user += w + "\n";
-      ChatOptions o;
-      o.json = true;
-      o.max_tokens = 4096;
-      reqs.push_back({{{"system", "你是词典编纂器，严格输出 JSON。"}, {"user", user}}, o});
-    }
-    auto resps = client.chat_batch(reqs, concurrency);
-    // 失败批重试一次
-    std::vector<int> retry_idx;
-    for (size_t i = 0; i < resps.size(); ++i)
-      if (resps[i].empty()) retry_idx.push_back((int)i);
-    if (!retry_idx.empty()) {
-      std::vector<ChatRequest> r2;
-      for (int i : retry_idx) r2.push_back(reqs[i]);
-      auto res2 = client.chat_batch(r2, concurrency);
-      for (size_t k = 0; k < retry_idx.size(); ++k) resps[retry_idx[k]] = res2[k];
-    }
-    for (size_t i = 0; i < resps.size(); ++i) {
-      size_t a = resps[i].find('{');
-      size_t b2 = resps[i].rfind('}');
-      if (a == std::string::npos || b2 <= a) { ++failed_batches; continue; }
-      bool ok = false;
-      Json obj = Json::parse(resps[i].substr(a, b2 - a + 1), &ok);
-      if (!ok || obj.kind != Json::Obj) { ++failed_batches; continue; }
-      for (auto& [word, ej] : obj.obj) {
-        entries.push(entry_to_json(parse_entry(word, ej)));
-        ++got;
-      }
-    }
-    write_lexicon(out_path, top_n, entries);  // 每轮原子落盘
-    AME_LOGI("lexicon: 进度 ", c1, "/", batches.size(), " 批（", std::fixed,
-             std::setprecision(1), 100.0 * c1 / batches.size(), "%），失败批 ", failed_batches);
-  }
-  AME_LOGI("lexicon: 本次新增 ", got, " 条，总覆盖率 ", have.size() + got,
-           "/", words_all.size(), "，失败批 ", failed_batches);
-  return got;
+  if (words.empty() && !write_lexicon(out_path, top_n, output)) return -1;
+  AME_LOGI("lexicon: 本次新增 ", added, " 条，总词条 ", output.positions.size());
+  return added;
 }
 
-
-// ---------------- 复活工程第四轮 M2：strong 流可互换性校验 ----------------
-// validate_lexicon_json 伪代码（断点续跑 + 批量缓存）：
-//   步骤1：读 in_path 全部词条；读 out_path 已有词条（若存在）建立已完成 word 集合；
-//   步骤2：未完成词条按 batch 分批，每批把 strong 对序列化为 "A|B" 列表进 prompt，
-//         要求 LLM 严格 JSON 数组回 [{"a":..,"b":..,"ok":true/false},...]；
-//   步骤3：chat_batch 并发；失败批重试一次；仍失败则该批 fail-open 保留
-//         （缓存使重跑零成本，宁可留噪声不丢真同义）；
-//   步骤4：每批后合并：entry 的 syn_strong 只留 ok=true 的对，整表原子落盘
-//         （source=distilled、validated=true；near/antonyms 原样保留）；
-//   步骤5：返回处理 pair 总数。
 int validate_lexicon_json(ILlmClient& client, const std::string& in_path,
                           const std::string& out_path, int batch, int concurrency) {
-  std::ifstream fi(in_path);
-  if (!fi) return -1;
-  std::stringstream ss;
-  ss << fi.rdbuf();
-  bool ok = false;
-  Json root = Json::parse(ss.str(), &ok);
-  if (!ok) return -1;
+  if (batch <= 0) return -1;
+  Json root;
+  if (!read_json(in_path, root)) return -1;
   const Json* entries = root.find("entries");
   if (!entries) return -1;
-
-  Json out = Json::object();
-  out["version"] = Json::string("v1");
-  out["source"] = Json::string("distilled");
-  out["validated"] = Json::boolean(true);
-  Json out_entries = Json::array();
-  std::unordered_set<std::string> done;
-  {
-    std::ifstream fo(out_path);
-    if (fo) {
-      std::stringstream ss2;
-      ss2 << fo.rdbuf();
-      bool ok2 = false;
-      Json old = Json::parse(ss2.str(), &ok2);
-      if (ok2) {
-        const Json* es = old.find("entries");
-        if (es)
-          for (auto& e : es->arr) {
-            out_entries.push(e);
-            const Json* w = e.find("word");
-            if (w) done.insert(w->as_str());
-          }
-      }
-    }
-  }
-
-  // 待处理：未完成词条的 (word, strong 对) 扁平序列，按 batch 对分组
-  struct PairItem {
-    std::string word, a, b;
-  };
-  std::vector<PairItem> pending;
-  for (auto& e : entries->arr) {
-    const Json* w = e.find("word");
-    if (!w || w->as_str().empty() || done.count(w->as_str())) continue;
-    const Json* strong = e.find("syn_strong");
-    if (!strong) continue;
-    for (auto& s : strong->arr)
-      if (!s.as_str().empty()) pending.push_back({w->as_str(), w->as_str(), s.as_str()});
-  }
-  // 整表落盘（带 source/validated 根字段；Windows rename 覆盖先删）
-  auto dump_out = [&]() {
-    out["entries"] = out_entries;
-    std::ofstream f(out_path + ".tmp", std::ios::binary | std::ios::trunc);
-    f << out.dump();
-    f.close();
-    std::remove(out_path.c_str());
-    std::rename((out_path + ".tmp").c_str(), out_path.c_str());
-  };
-
-  const int total_pairs = (int)pending.size();
-  AME_LOGI("validate: 目标 pair ", pending.size(), "（已完成 word ", done.size(),
-           "），批大小 ", batch);
-  if (pending.empty()) {
-    dump_out();
-    return 0;
-  }
-
-  std::unordered_map<std::string, std::unordered_set<std::string>> keep;  // word -> 保留对
-  std::unordered_map<std::string, std::vector<std::string>> word_strong;  // 原始顺序回填
-  std::unordered_map<std::string, const Json*> src_entry;
-  for (auto& e : entries->arr) {
-    const Json* w = e.find("word");
-    if (!w) continue;
-    src_entry[w->as_str()] = &e;
-    const Json* strong = e.find("syn_strong");
-    if (strong)
-      for (auto& s : strong->arr) word_strong[w->as_str()].push_back(s.as_str());
-  }
-
+  EntryStore output = load_validation_checkpoint(out_path, *entries);
+  const PairWork work = validation_work(*entries, output);
+  KeptPairs kept;
   int failed_batches = 0;
-  for (size_t c0 = 0; c0 < pending.size(); c0 += (size_t)batch * 100) {
-    size_t c1 = std::min(c0 + (size_t)batch * 100, pending.size());
-    std::vector<ChatRequest> reqs;
-    std::vector<std::pair<size_t, size_t>> req_span;  // (起始, 结束) 对区间
-    for (size_t i = c0; i < c1; i += (size_t)batch) {
-      size_t j = std::min(i + (size_t)batch, c1);
-      std::string user =
-          "You are a strict synonym validator. For each pair A|B below, answer: in most "
-          "sentences, can A be directly replaced by B without changing the meaning? "
-          "Reply with a JSON array only: [{\"a\":A,\"b\":B,\"ok\":true/false},...] "
-          "covering every pair in order.\nPairs:\n";
-      for (size_t k = i; k < j; ++k) user += pending[k].a + "|" + pending[k].b + "\n";
-      ChatOptions o;
-      o.json = true;
-      o.max_tokens = 4096;
-      reqs.push_back({{{"system", "你是严格的同义词校验器，只输出 JSON。"}, {"user", user}}, o});
-      req_span.emplace_back(i, j);
-    }
-    auto resps = client.chat_batch(reqs, concurrency);
-    std::vector<int> retry_idx;
-    for (size_t i = 0; i < resps.size(); ++i)
-      if (resps[i].empty()) retry_idx.push_back((int)i);
-    if (!retry_idx.empty()) {
-      std::vector<ChatRequest> r2;
-      for (int i : retry_idx) r2.push_back(reqs[i]);
-      auto res2 = client.chat_batch(r2, concurrency);
-      for (size_t k = 0; k < retry_idx.size(); ++k) resps[retry_idx[k]] = res2[k];
-    }
-    for (size_t i = 0; i < resps.size(); ++i) {
-      size_t a = req_span[i].first, b = req_span[i].second;
-      size_t p1 = resps[i].find('['), p2 = resps[i].rfind(']');
-      bool parsed = false;
-      if (p1 != std::string::npos && p2 > p1) {
-        bool ok2 = false;
-        Json arr = Json::parse(resps[i].substr(p1, p2 - p1 + 1), &ok2);
-        if (ok2 && arr.kind == Json::Arr) {
-          parsed = true;
-          std::unordered_set<std::string> verdicts;  // "a|b" -> keep（只记 yes）
-          for (auto& v : arr.arr) {
-            const Json* ja = v.find("a");
-            const Json* jb = v.find("b");
-            const Json* jok = v.find("ok");
-            if (!ja || !jb || !jok) continue;
-            if (jok->kind == Json::Bool && jok->b) verdicts.insert(ja->as_str() + "|" + jb->as_str());
-          }
-          for (size_t k = a; k < b; ++k) {
-            std::string key = pending[k].a + "|" + pending[k].b;
-            if (verdicts.count(key)) keep[pending[k].word].insert(pending[k].b);
-          }
-        }
-      }
-      if (!parsed) {
-        ++failed_batches;  // fail-open：该批对全部保留
-        for (size_t k = a; k < b; ++k) keep[pending[k].word].insert(pending[k].b);
-      }
-    }
-    // 本 chunk 覆盖到的 word 生成 out entry（保持原始词条序）
-    std::unordered_set<std::string> touched;
-    for (size_t k = c0; k < c1; ++k) touched.insert(pending[k].word);
-    for (auto& e : entries->arr) {
-      const Json* w = e.find("word");
-      if (!w || !touched.count(w->as_str())) continue;
-      Json ne = Json::object();
-      ne["word"] = Json::string(w->as_str());
-      Json js = Json::array();
-      for (auto& s : word_strong[w->as_str()])
-        if (keep[w->as_str()].count(s)) js.push(Json::string(s));
-      ne["syn_strong"] = std::move(js);
-      const Json* ant = e.find("antonyms");
-      Json ja = Json::array();
-      if (ant) for (auto& s : ant->arr) ja.push(Json::string(s.as_str()));
-      ne["antonyms"] = std::move(ja);
-      const Json* near = e.find("syn_near");
-      Json jn = Json::array();
-      if (near) for (auto& r : near->arr) jn.push(r);
-      ne["syn_near"] = std::move(jn);
-      out_entries.push(std::move(ne));
-      done.insert(w->as_str());
-    }
-    dump_out();
-    AME_LOGI("validate: 进度 ", c1, "/", pending.size(), " pair（失败批 ", failed_batches, "）");
+  const size_t chunk_size = static_cast<size_t>(batch) * kChunkBatches;
+  for (size_t begin = 0; begin < work.pairs.size(); begin += chunk_size) {
+    const size_t end = std::min(begin + chunk_size, work.pairs.size());
+    const auto chunk = build_pair_chunk(work, begin, end, batch, PairMode::Validate);
+    const auto responses = chat_with_retry(client, chunk.requests, concurrency);
+    for (size_t i = 0; i < responses.size(); ++i)
+      failed_batches += merge_validation_batch(responses[i], work, chunk.spans[i], kept);
+    commit_validated_words(*entries, work, end, kept, output);
+    if (!write_validation_checkpoint(out_path, output)) return -1;
+    AME_LOGI("validate: 进度 ", end, "/", work.pairs.size(), " pair，失败批 ", failed_batches);
   }
-  // 无 strong 对的词条原样带过（在 in 中且未进 out 的）
-  for (auto& e : entries->arr) {
-    const Json* w = e.find("word");
-    if (!w || done.count(w->as_str())) continue;
-    out_entries.push(e);
-  }
-  dump_out();
-  AME_LOGI("validate: 完成 pair ", total_pairs, "，失败批 ", failed_batches,
-           "（fail-open 保留）");
-  (void)src_entry;
-  return total_pairs;
+  carry_forward_entries(*entries, output);
+  if (!write_validation_checkpoint(out_path, output)) return -1;
+  return static_cast<int>(work.pairs.size());
 }
 
-// 复活工程第五轮 M3：词级近似连续打分（graded similarity 蒸馏）。
-// score_word_sims 伪代码：
-//   步骤1：读 in_path（蒸馏词库），对每个 word 取其 strong ∪ near 候选并集（去重）；
-//   步骤2：按 batch 对分批，prompt 要求对每个 "A|B" 打 1-10 分（10=同义可互换，
-//         7-9=高度近义常可替换，4-6=相关但多数场景不可替换，1-3=仅弱相关）；
-//   步骤3：chat_batch 并发 + 失败批重试一次；仍失败该批 fail-open 记 5 分（中性）；
-//   步骤4：每 chunk 合并写 out（{"source":"distilled-sim","sims":{w:{v:score/10}}}），
-//         断点续跑（按 word 跳过已完成）；返回 pair 总数。
 int score_word_sims(ILlmClient& client, const std::string& in_path,
                     const std::string& out_path, int batch, int concurrency) {
-  std::ifstream fi(in_path);
-  if (!fi) return -1;
-  std::stringstream ss;
-  ss << fi.rdbuf();
-  bool ok = false;
-  Json root = Json::parse(ss.str(), &ok);
-  if (!ok) return -1;
+  if (batch <= 0) return -1;
+  Json root;
+  if (!read_json(in_path, root)) return -1;
   const Json* entries = root.find("entries");
   if (!entries) return -1;
-
-  // 已完成 word 集合（断点续跑）：out 的 sims 键
-  std::unordered_set<std::string> done;
-  Json sims_out = Json::object();
-  {
-    std::ifstream fo(out_path);
-    if (fo) {
-      std::stringstream ss2;
-      ss2 << fo.rdbuf();
-      bool ok2 = false;
-      Json old = Json::parse(ss2.str(), &ok2);
-      if (ok2) {
-        const Json* s = old.find("sims");
-        if (s && s->kind == Json::Obj) {
-          sims_out = *s;
-          for (auto& [w, r] : s->obj) done.insert(w);
-        }
-      }
-    }
-  }
-
-  struct PairItem {
-    std::string word, b;
-  };
-  std::vector<PairItem> pending;
-  for (auto& e : entries->arr) {
-    const Json* w = e.find("word");
-    if (!w || w->as_str().empty() || done.count(w->as_str())) continue;
-    std::unordered_set<std::string> seen;
-    const Json* strong = e.find("syn_strong");
-    if (strong)
-      for (auto& s : strong->arr)
-        if (!s.as_str().empty() && seen.insert(s.as_str()).second)
-          pending.push_back({w->as_str(), s.as_str()});
-    const Json* near = e.find("syn_near");
-    if (near)
-      for (auto& r : near->arr) {
-        const Json* rw = r.find("word");
-        if (rw && !rw->as_str().empty() && seen.insert(rw->as_str()).second)
-          pending.push_back({w->as_str(), rw->as_str()});
-      }
-  }
-  const int total_pairs = (int)pending.size();
-  AME_LOGI("score-sims: 目标 pair ", pending.size(), "（已完成 word ", done.size(),
-           "），批大小 ", batch);
-  if (pending.empty()) return 0;
-
-  std::unordered_map<std::string, std::unordered_map<std::string, double>> scores;
+  Json output = load_score_checkpoint(out_path);
+  const PairWork work = scoring_work(*entries, output);
+  WordScores scores;
   int failed_batches = 0;
-  for (size_t c0 = 0; c0 < pending.size(); c0 += (size_t)batch * 100) {
-    size_t c1 = std::min(c0 + (size_t)batch * 100, pending.size());
-    std::vector<ChatRequest> reqs;
-    std::vector<std::pair<size_t, size_t>> req_span;
-    for (size_t i = c0; i < c1; i += (size_t)batch) {
-      size_t j = std::min(i + (size_t)batch, c1);
-      std::string user =
-          "Rate semantic similarity of each pair A|B for conversational English on a "
-          "1-10 scale (10=interchangeable synonyms, 7-9=highly similar usually "
-          "replaceable, 4-6=related but usually not replaceable, 1-3=weakly related). "
-          "Reply with a JSON array only: [{\"a\":A,\"b\":B,\"score\":N},...] covering "
-          "every pair in order.\nPairs:\n";
-      for (size_t k = i; k < j; ++k) user += pending[k].word + "|" + pending[k].b + "\n";
-      ChatOptions o;
-      o.json = true;
-      o.max_tokens = 4096;
-      reqs.push_back({{{"system", "你是严格的语义近似评分器，只输出 JSON。"}, {"user", user}}, o});
-      req_span.emplace_back(i, j);
-    }
-    auto resps = client.chat_batch(reqs, concurrency);
-    std::vector<int> retry_idx;
-    for (size_t i = 0; i < resps.size(); ++i)
-      if (resps[i].empty()) retry_idx.push_back((int)i);
-    if (!retry_idx.empty()) {
-      std::vector<ChatRequest> r2;
-      for (int i : retry_idx) r2.push_back(reqs[i]);
-      auto res2 = client.chat_batch(r2, concurrency);
-      for (size_t k = 0; k < retry_idx.size(); ++k) resps[retry_idx[k]] = res2[k];
-    }
-    for (size_t i = 0; i < resps.size(); ++i) {
-      size_t a = req_span[i].first, b = req_span[i].second;
-      size_t p1 = resps[i].find('['), p2 = resps[i].rfind(']');
-      bool parsed = false;
-      if (p1 != std::string::npos && p2 > p1) {
-        bool ok2 = false;
-        Json arr = Json::parse(resps[i].substr(p1, p2 - p1 + 1), &ok2);
-        if (ok2 && arr.kind == Json::Arr) {
-          std::unordered_map<std::string, double> got;
-          for (auto& v : arr.arr) {
-            const Json* ja = v.find("a");
-            const Json* jb = v.find("b");
-            const Json* js = v.find("score");
-            if (!ja || !jb || !js) continue;
-            got[ja->as_str() + "|" + jb->as_str()] = js->as_num(5.0);
-          }
-          parsed = true;
-          for (size_t k = a; k < b; ++k) {
-            auto it = got.find(pending[k].word + "|" + pending[k].b);
-            // 宽松回退：按序对位（LLM 偶尔改写 key）
-            double sc = (it != got.end())
-                            ? it->second
-                            : (got.count(pending[k].b) ? got[pending[k].b] : 5.0);
-            scores[pending[k].word][pending[k].b] = sc;
-          }
-        }
-      }
-      if (!parsed) {
-        ++failed_batches;
-        for (size_t k = a; k < b; ++k) scores[pending[k].word][pending[k].b] = 5.0;
-      }
-    }
-    // 本 chunk 的 word 落盘
-    std::unordered_set<std::string> touched;
-    for (size_t k = c0; k < c1; ++k) touched.insert(pending[k].word);
-    for (auto& [w, m] : scores) {
-      if (!touched.count(w) || done.count(w)) continue;
-      Json row = Json::object();
-      for (auto& [v, sc10] : m) row[v] = Json::number(sc10 / 10.0);
-      sims_out[w] = std::move(row);
-      done.insert(w);
-    }
-    Json out = Json::object();
-    out["source"] = Json::string("distilled-sim");
-    out["sims"] = sims_out;
-    std::ofstream wf(out_path + ".tmp", std::ios::binary | std::ios::trunc);
-    wf << out.dump();
-    wf.close();
-    std::remove(out_path.c_str());
-    std::rename((out_path + ".tmp").c_str(), out_path.c_str());
-    AME_LOGI("score-sims: 进度 ", c1, "/", pending.size(), " pair（失败批 ", failed_batches, "）");
+  const size_t chunk_size = static_cast<size_t>(batch) * kChunkBatches;
+  for (size_t begin = 0; begin < work.pairs.size(); begin += chunk_size) {
+    const size_t end = std::min(begin + chunk_size, work.pairs.size());
+    const auto chunk = build_pair_chunk(work, begin, end, batch, PairMode::Score);
+    const auto responses = chat_with_retry(client, chunk.requests, concurrency);
+    for (size_t i = 0; i < responses.size(); ++i)
+      failed_batches += merge_score_batch(responses[i], work, chunk.spans[i], scores);
+    commit_scored_words(work, end, scores, output);
+    if (!write_score_checkpoint(out_path, output)) return -1;
+    AME_LOGI("score-sims: 进度 ", end, "/", work.pairs.size(), " pair，失败批 ", failed_batches);
   }
-  AME_LOGI("score-sims: 完成 pair ", total_pairs, "，失败批 ", failed_batches,
-           "（fail-open 记 5 分）");
-  return total_pairs;
+  return static_cast<int>(work.pairs.size());
 }
+
 }  // namespace ame

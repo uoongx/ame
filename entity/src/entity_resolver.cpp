@@ -141,110 +141,110 @@ std::string EntityResolver::create_mention(const std::string& surface,
 //         标记待确认；<0.5 新建实体，is_new=true、suspected_dup=true，并在新
 //         实体 attrs 里记录 suspected_dup_of 指向最优候选
 //   步骤7：以最终置信度创建 Mention 并返回结果
+namespace {
+
+bool has_event_at_place(const Storage& storage, const std::string& uid,
+                        const std::string& place_uid) {
+  if (place_uid.empty()) return false;
+  for (const auto& [edge, node] : storage.neighbors(uid)) {
+    if (edge.type != RelType::INVOLVES || node->kind != NodeKind::Event) continue;
+    if (storage.find_edge(node->uid, place_uid, RelType::HAPPENED_AT)) return true;
+  }
+  return false;
+}
+
+double candidate_score(const Storage& storage, const Node& candidate,
+                        const ResolveContext& context, bool unique) {
+  double score = 0.4;
+  if (unique) score += 0.1;
+  for (const auto& uid : context.co_entity_uids) {
+    if (storage.find_edge(candidate.uid, uid, RelType::EXPERIENCED_TOGETHER) ||
+        storage.find_edge(uid, candidate.uid, RelType::EXPERIENCED_TOGETHER))
+      score += 0.3;
+  }
+  if (has_event_at_place(storage, candidate.uid, context.place_uid)) score += 0.2;
+  return score;
+}
+
+}  // namespace
+
+ResolveResult EntityResolver::resolve_identified(const std::string& surface,
+                                                  const Attrs& identifiers) {
+  ResolveResult rr;
+  // 显式 uid 优先于其它标识，失效 uid 仍可回退到强标识查询。
+  auto uid_it = identifiers.find("uid");
+  if (uid_it != identifiers.end()) {
+    std::string uid = redirect(uid_it->second);
+    if (storage_.get_node(uid)) rr.uid = uid;
+  }
+  if (rr.uid.empty()) rr.uid = find_entity(identifiers);
+  if (rr.uid.empty()) {
+    rr.uid = register_entity("person", surface, identifiers);
+    rr.is_new = true;
+  }
+  rr.confidence = 1.0;
+  rr.mention_uid = create_mention(surface, rr.uid, 1.0);
+  return rr;
+}
+
+std::vector<const Node*> EntityResolver::name_candidates(const std::string& surface) const {
+  std::vector<const Node*> candidates;
+  for (auto* node : storage_.find_all_by_name(NodeKind::Entity, surface)) {
+    if (redirect(node->uid) == node->uid) candidates.push_back(node);
+  }
+  // 仅实体名无候选时回退到别名；保留索引顺序和重复别名的原有评分语义。
+  if (!candidates.empty()) return candidates;
+  for (auto* alias : storage_.find_all_by_name(NodeKind::Alias, surface)) {
+    auto target = alias->attrs.find("target");
+    if (target == alias->attrs.end()) continue;
+    const Node* node = storage_.get_node(redirect(target->second));
+    if (node) candidates.push_back(node);
+  }
+  return candidates;
+}
+
+ResolveResult EntityResolver::resolve_candidates(const std::string& surface,
+                                                 const ResolveContext& context,
+                                                 const std::vector<const Node*>& candidates) {
+  ResolveResult rr;
+  const Node* best = nullptr;
+  double best_score = -1;
+  for (auto* candidate : candidates) {
+    double score = candidate_score(storage_, *candidate, context, candidates.size() == 1);
+    // 先按未截断分数选优，同分保留第一个候选，再将最终置信度截断到 1。
+    if (score > best_score) {
+      best_score = score;
+      best = candidate;
+    }
+    rr.candidates.push_back(candidate->uid);
+  }
+  rr.confidence = std::min(best_score, 1.0);
+  if (rr.confidence >= 0.5) {
+    rr.uid = best->uid;
+    rr.pending = rr.confidence <= 0.9;
+  } else {
+    rr.uid = register_entity("person", surface);
+    rr.is_new = true;
+    rr.suspected_dup = true;
+    storage_.get_node_mut(rr.uid)->attrs["suspected_dup_of"] = best->uid;
+  }
+  rr.mention_uid = create_mention(surface, rr.uid, rr.confidence);
+  return rr;
+}
+
 ResolveResult EntityResolver::resolve(const std::string& surface,
                                       const ResolveContext& context,
                                       const Attrs& identifiers) {
+  if (!identifiers.empty()) return resolve_identified(surface, identifiers);
+  auto candidates = name_candidates(surface);
+  if (!candidates.empty()) return resolve_candidates(surface, context, candidates);
+
   ResolveResult rr;
-
-  // 第 1 级：uid 直连
-  auto uid_it = identifiers.find("uid");
-  if (uid_it != identifiers.end()) {
-    std::string u = redirect(uid_it->second);
-    if (storage_.get_node(u)) {
-      rr.uid = u;
-      rr.confidence = 1.0;
-      rr.mention_uid = create_mention(surface, u, 1.0);
-      return rr;
-    }
-    // uid 无效则落入后续流程
-  }
-
-  // 第 2 级：强标识符精确匹配，无则建档
-  if (!identifiers.empty()) {
-    std::string u = find_entity(identifiers);
-    if (!u.empty()) {
-      rr.uid = u;
-      rr.confidence = 1.0;
-      rr.mention_uid = create_mention(surface, u, 1.0);
-      return rr;
-    }
-    rr.uid = register_entity("person", surface, identifiers);
-    rr.confidence = 1.0;
-    rr.is_new = true;
-    rr.mention_uid = create_mention(surface, rr.uid, 1.0);
-    return rr;
-  }
-
-  // 第 3 级：裸名字 + 上下文证据投票（名字索引 O(1) 取候选，不再全表扫描）
-  std::vector<const Node*> cands;
-  for (auto* n : storage_.find_all_by_name(NodeKind::Entity, surface)) {
-    if (redirect(n->uid) != n->uid) continue;  // 已合并的旧节点跳过
-    cands.push_back(n);
-  }
-  // 别名匹配：扫 Alias 节点（名字索引同样适用）
-  if (cands.empty()) {
-    for (auto* a : storage_.find_all_by_name(NodeKind::Alias, surface)) {
-      auto it = a->attrs.find("target");
-      if (it != a->attrs.end()) {
-        const Node* n = storage_.get_node(redirect(it->second));
-        if (n) cands.push_back(n);
-      }
-    }
-  }
-
-  if (cands.empty()) {
-    // 无候选：直接新建
-    rr.uid = register_entity("person", surface);
-    rr.confidence = 0.3;
-    rr.is_new = true;
-    rr.mention_uid = create_mention(surface, rr.uid, 1.0);
-    return rr;
-  }
-
-  // 证据投票：基础分 0.4；共同经历 +0.3；空间一致 +0.2；唯一候选 +0.1
-  const Node* best = nullptr;
-  double best_score = -1;
-  for (auto* c : cands) {
-    double score = 0.4;
-    if (cands.size() == 1) score += 0.1;
-    for (auto& co : context.co_entity_uids) {
-      if (storage_.find_edge(c->uid, co, RelType::EXPERIENCED_TOGETHER) ||
-          storage_.find_edge(co, c->uid, RelType::EXPERIENCED_TOGETHER))
-        score += 0.3;
-    }
-    if (!context.place_uid.empty()) {
-      // 空间一致性：候选实体历史事件是否发生在同地点
-      for (auto& [e, n] : storage_.neighbors(c->uid)) {
-        if (e.type != RelType::INVOLVES || n->kind != NodeKind::Event) continue;
-        if (storage_.find_edge(n->uid, context.place_uid, RelType::HAPPENED_AT)) {
-          score += 0.2;
-          break;
-        }
-      }
-    }
-    if (score > best_score) { best_score = score; best = c; }
-    rr.candidates.push_back(c->uid);
-  }
-  if (best_score > 1.0) best_score = 1.0;
-
-  if (best_score > 0.9) {
-    rr.uid = best->uid;
-    rr.confidence = best_score;
-  } else if (best_score >= 0.5) {
-    rr.uid = best->uid;
-    rr.confidence = best_score;
-    rr.pending = true;  // 标记待确认
-    Node* m = storage_.get_node_mut(best->uid);
-    (void)m;
-  } else {
-    rr.uid = register_entity("person", surface);
-    rr.confidence = best_score;
-    rr.is_new = true;
-    rr.suspected_dup = true;
-    Node* m = storage_.get_node_mut(rr.uid);
-    m->attrs["suspected_dup_of"] = best->uid;
-  }
-  rr.mention_uid = create_mention(surface, rr.uid, rr.confidence);
+  rr.uid = register_entity("person", surface);
+  rr.confidence = 0.3;
+  rr.is_new = true;
+  // 保留首次建档的 Mention 边权 1.0；对外消歧置信度仍为 0.3。
+  rr.mention_uid = create_mention(surface, rr.uid, 1.0);
   return rr;
 }
 

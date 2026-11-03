@@ -64,9 +64,60 @@ static void test_engine_stats() {
   CHECK(s1.nodes > 2);  // 事件 + speaker 实体 + 关键词节点
 }
 
+static void test_lookup_combined_filters_and_limits() {
+  Engine engine;
+  Storage& storage = engine.storage();
+  Node actor, place, keyword;
+  actor.uid = "actor"; actor.kind = NodeKind::Entity;
+  place.uid = "place"; place.kind = NodeKind::Place;
+  keyword.uid = "keyword"; keyword.kind = NodeKind::Keyword; keyword.name = "失眠";
+  storage.put_node(actor); storage.put_node(place); storage.put_node(keyword);
+  engine.keywords().add_alias("sleep", "失眠");
+  for (int i = 1; i <= 3; ++i) {
+    Node event;
+    event.uid = "event" + std::to_string(i);
+    event.kind = NodeKind::Event;
+    event.ts = i * 100;
+    event.importance = 1.0 / i;
+    if (i == 1) event.attrs["valid_to"] = "150";
+    storage.put_node(event);
+    storage.put_edge(Edge{event.uid, actor.uid, RelType::INVOLVES, 1.0, {}});
+    storage.put_edge(Edge{event.uid, place.uid, RelType::HAPPENED_AT, 1.0, {}});
+    storage.put_edge(Edge{event.uid, keyword.uid, RelType::CONTAINS, 1.0, {}});
+  }
+  LookupQuery query;
+  query.entity_uids = {"missing", actor.uid};
+  query.place_uid = place.uid;
+  query.keywords = {"unmatched", "SLEEP"};
+  query.time_from = 100;
+  query.time_to = 300;
+  query.current_only = true;
+  auto results = engine.lookup(query);
+  CHECK(results.size() == 2 && results[0]->uid == "event3" && results[1]->uid == "event2");
+  query.order_by = "importance";
+  query.limit = 1;
+  CHECK(engine.lookup(query).at(0)->uid == "event2");
+  query.current_only = false;
+  CHECK(engine.lookup(query).at(0)->uid == "event1");
+  query.limit = 0;
+  CHECK(engine.lookup(query).empty());
+  query.limit = -1;
+  CHECK(engine.lookup(query).empty());
+  query.limit = 10;
+  query.place_uid = "wrong place";
+  CHECK(engine.lookup(query).empty());
+  query.place_uid = place.uid;
+  query.entity_uids = {"wrong actor"};
+  CHECK(engine.lookup(query).empty());
+  query.entity_uids = {actor.uid};
+  query.keywords = {"unmatched"};
+  CHECK(engine.lookup(query).empty());
+}
+
 int main() {
   test_lookup();
   test_gateway_verbs();
   test_engine_stats();
+  test_lookup_combined_filters_and_limits();
   return AME_TEST_REPORT();
 }

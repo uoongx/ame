@@ -83,8 +83,48 @@ static void test_summarize() {
   CHECK(s.find_edge(sum_id, "ent1", RelType::INVOLVES) != nullptr);
 }
 
+static void test_anchor_deduplication_and_write_sequence() {
+  Storage storage;
+  KeywordManager keywords(storage);
+  TimeService time(&storage);
+  VectorService vectors(&storage);
+  GraphWriter writer(storage, keywords, time, vectors);
+  Node actor;
+  actor.uid = "actor"; actor.kind = NodeKind::Entity;
+  storage.put_node(actor);
+  std::string keyword_uid = keywords.get_or_create("alpha", "action");
+  CHECK(storage.get_node(keyword_uid)->status == 1);
+  Extraction first;
+  first.event.text = "first event with a name longer than 24 bytes";
+  first.event.time = 100;
+  first.entities = {{"speaker", "old role", "person", {}},
+                    {"speaker", "new role", "person", {}}};
+  first.keywords = {{"ALPHA", "action"}, {"alpha", "topic"}, {"的", "action"}};
+  first.place.name = "test place";
+  auto result = writer.write_event(first, {{"speaker", actor.uid}, {"missing", "absent"}, {"empty", ""}});
+  CHECK(result.code == Err::Ok && result.resolved.size() == 1);
+  CHECK(storage.get_node(result.event_id)->name == first.event.text.substr(0, 24));
+  CHECK(storage.find_edge(result.event_id, actor.uid, RelType::INVOLVES)->attrs.at("role") == "new role");
+  auto contains = storage.neighbors(result.event_id, {RelType::CONTAINS});
+  CHECK(contains.size() == 1 && contains[0].first.attrs.at("category") == "action");
+  const Node* keyword = storage.get_node(keyword_uid);
+  CHECK(keyword->mention_count == 3 && keyword->status == 0 && !keyword->embedding.empty());
+  CHECK(!storage.find_edge(keyword_uid, keyword_uid, RelType::REL_COOCCUR));
+  CHECK(storage.neighbors(result.event_id, {RelType::HAPPENED_AT}).size() == 1);
+  size_t nodes = storage.node_count();
+  CHECK(writer.write_event(Extraction{}, {}).code == Err::InvalidArg);
+  CHECK(storage.node_count() == nodes);
+  Extraction second;
+  second.event.text = "second event";
+  second.event.time = 200;
+  auto next = writer.write_event(second, {{"unlisted", actor.uid}});
+  CHECK(storage.find_edge(result.event_id, next.event_id, RelType::NEXT));
+  CHECK(storage.find_edge(next.event_id, actor.uid, RelType::INVOLVES)->attrs.at("role") == "人物");
+}
+
 int main() {
   test_autogrow();
   test_summarize();
+  test_anchor_deduplication_and_write_sequence();
   return AME_TEST_REPORT();
 }

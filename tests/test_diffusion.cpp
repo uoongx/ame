@@ -105,10 +105,56 @@ static void test_beam() {
   CHECK(beam3["c10"].paths[0].steps[0].type == RelType::REL_SIMILAR);
 }
 
+static void test_multiple_paths_and_gate_budget() {
+  Storage storage;
+  DiffusionEngine engine(storage);
+  for (const auto& uid : {"a", "b", "c", "d", "dormant"}) {
+    Node node;
+    node.uid = uid;
+    node.kind = NodeKind::Keyword;
+    node.status = node.uid == "dormant" ? 1 : 0;
+    storage.put_node(node);
+  }
+  storage.put_edge(Edge{"a", "c", RelType::REL_CAUSE, 1.0, {}});
+  storage.put_edge(Edge{"b", "c", RelType::REL_CAUSE, 1.0, {}});
+  storage.put_edge(Edge{"c", "d", RelType::REL_CAUSE, 1.0, {}});
+  storage.put_edge(Edge{"a", "dormant", RelType::REL_CAUSE, 1.0, {}});
+  const auto gate = [](const Edge&, const Node&, const Node&, int) { return 1.0; };
+  const std::vector<DiffusionSeed> seeds = {{"a", 1.0}, {"b", 2.0}, {"missing", 9.0}};
+  auto result = engine.diffuse_beam(seeds, 2, nullptr, nullptr, 100, 0, gate);
+  // Dormant edges still contribute to a's degree. c accumulates both paths,
+  // while its outgoing energy/path comes from the first arrival (a, 0.25).
+  CHECK_NEAR(result.at("c").energy, 1.25, 1e-9);
+  CHECK_NEAR(result.at("d").energy, 1.0 / 18.0, 1e-9);
+  CHECK(result.at("c").paths[0].steps[0].from == "b");
+  CHECK(result.at("d").paths[0].steps[0].from == "a");
+  CHECK(!result.count("dormant") && !result.count("missing"));
+  auto limited = engine.diffuse_beam(seeds, 2, nullptr, nullptr, 2, 0, gate);
+  CHECK(limited.count("c") && !limited.count("d"));
+  auto stopped = engine.diffuse_beam(seeds, 2, nullptr, nullptr, 0, 0, gate);
+  CHECK(stopped.size() == 2 && stopped.at("b").energy == 2.0);
+}
+
+static void test_softened_weight_and_type_multiplier() {
+  Storage storage;
+  DiffusionEngine engine(storage);
+  Node first, second;
+  first.uid = "first";
+  second.uid = "second";
+  storage.put_node(first);
+  storage.put_node(second);
+  storage.put_edge(Edge{first.uid, second.uid, RelType::REL_CAUSE, 9.0, {}});
+  std::unordered_map<int, double> weights = {{static_cast<int>(RelType::REL_CAUSE), 0.5}};
+  auto result = engine.diffuse({{first.uid, 1.0}}, 2, nullptr, &weights, 1);
+  CHECK_NEAR(result.at(second.uid).energy, 0.9 * (5.0 + std::log1p(4.0)) * 0.5 / 2.0, 1e-9);
+}
+
 int main() {
   test_energy_and_paths();
   test_dormant_and_budget();
   test_reltype_filter();
   test_beam();
+  test_multiple_paths_and_gate_budget();
+  test_softened_weight_and_type_multiplier();
   return AME_TEST_REPORT();
 }

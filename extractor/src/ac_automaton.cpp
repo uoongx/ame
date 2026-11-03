@@ -23,6 +23,8 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <new>
+#include <stdexcept>
 #include <sys/stat.h>
 
 namespace ame {
@@ -217,65 +219,218 @@ bool RuleExtractor::ac_save(const std::string& cache_path, uint64_t dict_size,
   return f.good();
 }
 
-// ac_load 伪代码：
-//   步骤1：校验 magic/version/(size,mtime)——任一不符返回 false（调用方重建覆写）；
-//   步骤2：读词表（词/类别/码点长）→ 读节点表直接建结构；
-//   步骤3：置 ac_built_=true 返回 true。
-bool RuleExtractor::ac_load(const std::string& cache_path, uint64_t dict_size,
-                            uint64_t dict_mtime) {
-  std::ifstream f(cache_path, std::ios::binary);
-  if (!f) return false;
+namespace {
+// Bounds cover the supported large dictionaries while rejecting allocation requests
+// that are disproportionate to the actual cache payload.
+constexpr uint64_t kMaxAcCacheBytes = 256ULL * 1024 * 1024;
+constexpr uint32_t kMaxAcWords = 2 * 1024 * 1024;
+constexpr uint32_t kMaxAcNodes = 8 * 1024 * 1024;
+constexpr uint32_t kMaxAcEdges = 8 * 1024 * 1024;
+
+class AcCacheReader {
+ public:
+  explicit AcCacheReader(const std::string& path) : file_(path, std::ios::binary | std::ios::ate) {
+    if (!file_) return;
+    auto size = file_.tellg();
+    if (size < 0 || (uint64_t)size > kMaxAcCacheBytes) return;
+    remaining_ = (uint64_t)size;
+    file_.seekg(0);
+    valid_ = (bool)file_;
+  }
+  bool bytes(char* destination, size_t count) {
+    if (!valid_ || count > remaining_) return false;
+    if (!file_.read(destination, (std::streamsize)count)) return false;
+    remaining_ -= count;
+    return true;
+  }
+  template <typename T> bool read(T& value) {
+    return bytes(reinterpret_cast<char*>(&value), sizeof(value));
+  }
+  bool count(uint32_t& value, size_t minimum_bytes, uint32_t maximum) {
+    if (!read(value)) return false;
+    return value <= maximum && value <= remaining_ / minimum_bytes;
+  }
+  bool string(std::string& value) {
+    uint16_t length = 0;
+    if (!read(length) || length > remaining_) return false;
+    value.resize(length);
+    return bytes(value.data(), length);
+  }
+  bool finished() const { return valid_ && remaining_ == 0; }
+
+ private:
+  std::ifstream file_;
+  uint64_t remaining_ = 0;
+  bool valid_ = false;
+};
+
+bool read_cache_header(AcCacheReader& reader, uint64_t dict_size, uint64_t dict_mtime) {
   char magic[5];
-  if (!f.read(magic, 5) || std::memcmp(magic, kAcMagic, 5) != 0) return false;
-  uint32_t ver;
-  uint64_t sz, mt;
-  if (!rd(f, ver) || ver != kAcVersion) return false;
-  if (!rd(f, sz) || !rd(f, mt)) return false;
-  if (sz != dict_size || mt != dict_mtime) return false;  // 词典已变 → 重建
-  uint32_t nw;
-  if (!rd(f, nw)) return false;
-  ac_words_.assign(nw, "");
-  ac_cats_.assign(nw, "");
-  ac_lens_.assign(nw, 0);
-  for (uint32_t i = 0; i < nw; ++i) {
-    uint16_t wl, cl;
-    if (!rd(f, wl)) return false;
-    ac_words_[i].resize(wl);
-    if (!f.read(ac_words_[i].data(), wl)) return false;
-    if (!rd(f, cl)) return false;
-    ac_cats_[i].resize(cl);
-    if (!f.read(ac_cats_[i].data(), cl)) return false;
-    if (!rd(f, ac_lens_[i])) return false;
-  }
-  uint32_t nn;
-  if (!rd(f, nn)) return false;
-  ac_nodes_.assign(nn, {});
-  for (uint32_t i = 0; i < nn; ++i) {
-    auto& nd = ac_nodes_[i];
-    uint32_t ne;
-    if (!rd(f, nd.out) || !rd(f, nd.fail) || !rd(f, nd.outlink) || !rd(f, ne))
+  uint32_t version = 0;
+  uint64_t size = 0, mtime = 0;
+  if (!reader.bytes(magic, sizeof(magic)) || std::memcmp(magic, kAcMagic, 5) != 0) return false;
+  if (!reader.read(version) || version != kAcVersion) return false;
+  if (!reader.read(size) || !reader.read(mtime)) return false;
+  return size == dict_size && mtime == dict_mtime;
+}
+
+bool read_word_table(AcCacheReader& reader, std::vector<std::string>& words,
+                     std::vector<std::string>& categories, std::vector<int>& lengths) {
+  uint32_t count = 0;
+  if (!reader.count(count, 8, kMaxAcWords)) return false;
+  words.resize(count);
+  categories.resize(count);
+  lengths.resize(count);
+  for (uint32_t i = 0; i < count; ++i) {
+    if (!reader.string(words[i]) || !reader.string(categories[i]) || !reader.read(lengths[i]))
       return false;
-    nd.next.resize(ne);
-    for (uint32_t j = 0; j < ne; ++j)
-      if (!rd(f, nd.next[j].first) || !rd(f, nd.next[j].second)) return false;
+    if (words[i].empty() || lengths[i] <= 0) return false;
+    if ((size_t)lengths[i] != ac_decode(words[i]).size()) return false;
   }
-  ac_built_ = true;
   return true;
 }
 
-// load_keyword_dict_cached 伪代码：
-//   步骤1：取词典文件 size/mtime；cache 加载成功（校验一致）直接返回词条数；
-//   步骤2：否则走 load_keyword_dict 全量构建，构建成功后覆写 cache（尽力而为）。
+template <typename Node>
+bool read_cache_node(AcCacheReader& reader, Node& node, uint32_t& edges_left) {
+  uint32_t edges = 0;
+  if (!reader.read(node.out) || !reader.read(node.fail) || !reader.read(node.outlink)) return false;
+  if (!reader.count(edges, 8, edges_left)) return false;
+  edges_left -= edges;
+  node.next.resize(edges);
+  for (auto& edge : node.next)
+    if (!reader.read(edge.first) || !reader.read(edge.second)) return false;
+  return true;
+}
+
+template <typename Nodes>
+bool read_node_table(AcCacheReader& reader, Nodes& nodes) {
+  uint32_t count = 0, edges_left = kMaxAcEdges;
+  if (!reader.count(count, 16, kMaxAcNodes) || count == 0) return false;
+  nodes.resize(count);
+  for (auto& node : nodes)
+    if (!read_cache_node(reader, node, edges_left)) return false;
+  return true;
+}
+
+bool valid_node_index(int index, size_t count) {
+  return index >= 0 && (size_t)index < count;
+}
+
+template <typename Node>
+bool valid_transitions(const Node& node, size_t node_count) {
+  uint32_t previous = 0;
+  bool first = true;
+  for (const auto& [codepoint, target] : node.next) {
+    if (!first && codepoint <= previous) return false;
+    if (target == 0 || !valid_node_index(target, node_count)) return false;
+    previous = codepoint;
+    first = false;
+  }
+  return true;
+}
+
+template <typename Node>
+bool valid_node_fields(const Node& node, size_t node_count, size_t word_count) {
+  if (!valid_node_index(node.fail, node_count) || !valid_node_index(node.outlink, node_count))
+    return false;
+  if (node.out < -1) return false;
+  if (node.out >= 0 && (size_t)node.out >= word_count) return false;
+  return valid_transitions(node, node_count);
+}
+
+template <typename Node>
+bool visit_trie_children(const Node& node, size_t depth, std::vector<size_t>& depths,
+                          std::vector<size_t>& pending) {
+  for (const auto& [codepoint, target] : node.next) {
+    (void)codepoint;
+    if (depths[target] != 0) return false;  // A second parent or transition cycle.
+    depths[target] = depth + 1;
+    pending.push_back((size_t)target);
+  }
+  return true;
+}
+
+template <typename Nodes>
+bool trie_depths(const Nodes& nodes, std::vector<size_t>& depths) {
+  depths.assign(nodes.size(), 0);
+  depths[0] = 1;  // Zero is reserved for unvisited nodes.
+  std::vector<size_t> pending{0};
+  for (size_t i = 0; i < pending.size(); ++i) {
+    size_t node = pending[i];
+    if (!visit_trie_children(nodes[node], depths[node], depths, pending)) return false;
+  }
+  return pending.size() == nodes.size();
+}
+
+template <typename Nodes>
+bool valid_suffix_links(const Nodes& nodes, size_t index, const std::vector<size_t>& depths,
+                         const std::vector<int>& word_lengths) {
+  const auto& node = nodes[index];
+  // Strictly decreasing trie depth proves both linked chains terminate at root.
+  if (depths[node.fail] >= depths[index] || depths[node.outlink] >= depths[index]) return false;
+  const auto& failure = nodes[node.fail];
+  int expected_output = failure.out >= 0 ? node.fail : failure.outlink;
+  if (node.outlink != expected_output) return false;
+  if (node.out >= 0 && (size_t)word_lengths[node.out] != depths[index] - 1) return false;
+  return true;
+}
+
+template <typename Nodes>
+bool validate_automaton(const Nodes& nodes, const std::vector<int>& word_lengths) {
+  if (nodes.empty()) return false;
+  const auto& root = nodes[0];
+  if (root.fail != 0 || root.outlink != 0 || root.out != -1) return false;
+  for (const auto& node : nodes)
+    if (!valid_node_fields(node, nodes.size(), word_lengths.size())) return false;
+  std::vector<size_t> depths;
+  if (!trie_depths(nodes, depths)) return false;
+  for (size_t i = 1; i < nodes.size(); ++i)
+    if (!valid_suffix_links(nodes, i, depths, word_lengths)) return false;
+  return true;
+}
+}  // namespace
+
+void RuleExtractor::swap_ac_state(RuleExtractor& other) noexcept {
+  ac_words_.swap(other.ac_words_);
+  ac_cats_.swap(other.ac_cats_);
+  ac_lens_.swap(other.ac_lens_);
+  ac_nodes_.swap(other.ac_nodes_);
+  std::swap(ac_built_, other.ac_built_);
+}
+
+bool RuleExtractor::ac_load(const std::string& cache_path, uint64_t dict_size,
+                             uint64_t dict_mtime) {
+  try {
+    AcCacheReader reader(cache_path);
+    if (!read_cache_header(reader, dict_size, dict_mtime)) return false;
+    RuleExtractor loaded;
+    if (!read_word_table(reader, loaded.ac_words_, loaded.ac_cats_, loaded.ac_lens_)) return false;
+    if (!read_node_table(reader, loaded.ac_nodes_) || !reader.finished()) return false;
+    if (!validate_automaton(loaded.ac_nodes_, loaded.ac_lens_)) return false;
+    loaded.ac_built_ = true;
+    swap_ac_state(loaded);
+    return true;
+  } catch (const std::bad_alloc&) {
+    return false;
+  } catch (const std::length_error&) {
+    return false;
+  }
+}
+
 int RuleExtractor::load_keyword_dict_cached(const std::string& path,
                                             const std::string& category, int cap,
                                             const std::string& cache_path) {
   struct stat st {};
   if (stat(path.c_str(), &st) != 0) return -1;
-  uint64_t sz = (uint64_t)st.st_size, mt = (uint64_t)st.st_mtime;
-  if (ac_load(cache_path, sz, mt)) return (int)ac_words_.size();
-  int n = load_keyword_dict(path, category, cap);
-  if (n > 0) ac_save(cache_path, sz, mt);  // 覆写缓存，下次直接加载
-  return n;
+  uint64_t size = (uint64_t)st.st_size, mtime = (uint64_t)st.st_mtime;
+  if (ac_load(cache_path, size, mtime)) return (int)ac_words_.size();
+  // Rebuild in isolation: failed cache reads must not append to an old dictionary.
+  RuleExtractor rebuilt;
+  int count = rebuilt.load_keyword_dict(path, category, cap);
+  if (count <= 0) return count;
+  swap_ac_state(rebuilt);
+  ac_save(cache_path, size, mtime);  // Best effort; the rebuilt dictionary is usable.
+  return count;
 }
 
 }  // namespace ame

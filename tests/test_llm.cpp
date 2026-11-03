@@ -6,10 +6,14 @@
  * 集成测试（真实 API）默认跳过，设 AME_RUN_LLM_IT=1 才执行。
  */
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 
 #include "ame/bench/bench.h"
+#include "ame/core/json.h"
 #include "ame/engine/engine.h"
 #include "ame/llm/components.h"
 #include "ame/llm/llm.h"
@@ -228,6 +232,275 @@ static void test_extract_batch() {
   CHECK(LlmAnswerer::parse_extract_batch("[E1]: valid\n", -1).empty());
 }
 
+// 唯一临时目录隔离词典检查点；所有 LLM 调用均为内存 fake。
+struct LexiconFiles {
+  std::filesystem::path directory;
+  LexiconFiles() {
+    static std::atomic<unsigned> sequence{0};
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    directory = std::filesystem::temp_directory_path() /
+        ("ame-lexicon-" + std::to_string(stamp) + "-" + std::to_string(sequence++));
+    std::filesystem::create_directories(directory);
+  }
+  ~LexiconFiles() {
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+  }
+  std::string path(const std::string& name) const { return (directory / name).string(); }
+  void write(const std::string& name, const Json& value) const {
+    std::ofstream output(path(name));
+    output << value.dump();
+    CHECK(output.good());
+  }
+  Json read(const std::string& name) const {
+    std::ifstream input(path(name));
+    std::stringstream contents;
+    contents << input.rdbuf();
+    bool ok = false;
+    Json value = Json::parse(contents.str(), &ok);
+    CHECK(ok);
+    return value;
+  }
+};
+
+static Json lexicon_entry(const std::string& word, int pairs) {
+  Json entry = Json::object();
+  entry["word"] = Json::string(word);
+  Json strong = Json::array();
+  for (int i = 0; i < pairs; ++i) strong.push(Json::string("syn-" + std::to_string(i)));
+  entry["syn_strong"] = std::move(strong);
+  return entry;
+}
+
+static Json lexicon_input(int pairs, bool completed_prefix = false) {
+  Json root = Json::object();
+  Json entries = Json::array();
+  if (completed_prefix) entries.push(lexicon_entry("finished", 1));
+  entries.push(lexicon_entry("anchor", pairs));
+  root["entries"] = std::move(entries);
+  return root;
+}
+
+static Json find_lexicon_entry(const Json& root, const std::string& word) {
+  const Json* entries = root.find("entries");
+  if (!entries) return {};
+  for (const auto& entry : entries->arr) {
+    const Json* candidate = entry.find("word");
+    if (candidate && candidate->as_str() == word) return entry;
+  }
+  return {};
+}
+
+static void test_lexicon_cross_chunk() {
+  LexiconFiles files;
+  files.write("input.json", lexicon_input(101));
+  FakeLlmClient score, validate;
+  score.default_response = "[]";
+  validate.default_response = "[]";
+  CHECK(score_word_sims(score, files.path("input.json"), files.path("scores.json"), 1, 1) == 101);
+  Json scored = files.read("scores.json");
+  CHECK(scored["sims"]["anchor"].obj.size() == 101);
+  CHECK_NEAR(scored["sims"]["anchor"]["syn-100"].as_num(), 0.5, 1e-9);
+  CHECK(score.received.size() == 101);
+  CHECK(validate_lexicon_json(validate, files.path("input.json"), files.path("validated.json"), 1, 1) == 101);
+  Json validated = files.read("validated.json");
+  CHECK(validated["entries"].arr.size() == 1);
+  CHECK(find_lexicon_entry(validated, "anchor")["syn_strong"].arr.empty());
+  CHECK(validate.received.size() == 101);
+  // 完整检查点再次运行不发请求。
+  CHECK(score_word_sims(score, files.path("input.json"), files.path("scores.json"), 1, 1) == 0);
+  CHECK(validate_lexicon_json(validate, files.path("input.json"), files.path("validated.json"), 1, 1) == 0);
+  CHECK(score.received.size() == 101 && validate.received.size() == 101);
+}
+
+struct LexiconInterrupted {};
+class InterruptingLexiconClient : public FakeLlmClient {
+ public:
+  int batches = 0;
+  std::vector<std::string> chat_batch(const std::vector<ChatRequest>& requests, int concurrency) override {
+    if (++batches == 2) throw LexiconInterrupted{};
+    return ILlmClient::chat_batch(requests, concurrency);
+  }
+};
+
+using LexiconOperation = int (*)(ILlmClient&, const std::string&, const std::string&, int, int);
+static void interrupt_after_first_chunk(LexiconOperation operation, const LexiconFiles& files) {
+  InterruptingLexiconClient client;
+  client.default_response = "invalid JSON";  // validate 保留，score 采用中性分数。
+  bool interrupted = false;
+  try {
+    operation(client, files.path("input.json"), files.path("checkpoint.json"), 1, 1);
+  } catch (const LexiconInterrupted&) {
+    interrupted = true;
+  }
+  CHECK(interrupted);
+  CHECK(client.received.size() == 100);
+}
+
+static void test_validate_word_checkpoint_resume() {
+  LexiconFiles files;
+  files.write("input.json", lexicon_input(101, true));
+  interrupt_after_first_chunk(validate_lexicon_json, files);
+  Json partial = files.read("checkpoint.json");
+  CHECK(partial["entries"].arr.size() == 1);
+  CHECK(!find_lexicon_entry(partial, "finished").is_null());
+  CHECK(find_lexicon_entry(partial, "anchor").is_null());
+  FakeLlmClient resumed;
+  resumed.default_response = "invalid JSON";
+  CHECK(validate_lexicon_json(resumed, files.path("input.json"), files.path("checkpoint.json"), 1, 1) == 101);
+  Json complete = files.read("checkpoint.json");
+  CHECK(complete["entries"].arr.size() == 2);
+  CHECK(find_lexicon_entry(complete, "anchor")["syn_strong"].arr.size() == 101);
+  CHECK(find_lexicon_entry(complete, "finished")["syn_strong"].arr.size() == 1);
+  CHECK(resumed.received.size() == 101);
+}
+
+static void test_score_word_checkpoint_resume() {
+  LexiconFiles files;
+  files.write("input.json", lexicon_input(101, true));
+  interrupt_after_first_chunk(score_word_sims, files);
+  Json partial = files.read("checkpoint.json");
+  CHECK(partial["sims"].obj.size() == 1);
+  CHECK(partial["sims"].find("finished") != nullptr);
+  CHECK(partial["sims"].find("anchor") == nullptr);
+  FakeLlmClient resumed;
+  resumed.default_response = "[]";
+  CHECK(score_word_sims(resumed, files.path("input.json"), files.path("checkpoint.json"), 1, 1) == 101);
+  Json complete = files.read("checkpoint.json");
+  CHECK(complete["sims"]["anchor"].obj.size() == 101);
+  CHECK_NEAR(complete["sims"]["anchor"]["syn-100"].as_num(), 0.5, 1e-9);
+  CHECK(complete["sims"]["finished"].obj.size() == 1);
+  CHECK(resumed.received.size() == 101);
+}
+
+static void test_legacy_lexicon_checkpoint_repair() {
+  LexiconFiles files;
+  files.write("input.json", lexicon_input(101));
+  Json old_scores = Json::object();
+  for (int i = 0; i < 100; ++i) old_scores["sims"]["anchor"]["syn-" + std::to_string(i)] = Json::number(0.7);
+  files.write("scores.json", old_scores);
+  Json old_validated = lexicon_input(100);
+  old_validated["entries"].push(lexicon_entry("anchor", 100));
+  old_validated["entries"].push(lexicon_entry("unrelated-history", 1));
+  old_validated["validated"] = Json::boolean(true);
+  files.write("validated.json", old_validated);
+  FakeLlmClient score, validate;
+  score.default_response = "[]";
+  validate.default_response = "invalid JSON";
+  CHECK(score_word_sims(score, files.path("input.json"), files.path("scores.json"), 1, 1) == 101);
+  CHECK(files.read("scores.json")["sims"]["anchor"].obj.size() == 101);
+  CHECK(validate_lexicon_json(validate, files.path("input.json"), files.path("validated.json"), 1, 1) == 101);
+  Json repaired = files.read("validated.json");
+  CHECK(repaired["entries"].arr.size() == 2);
+  CHECK(find_lexicon_entry(repaired, "anchor")["syn_strong"].arr.size() == 101);
+  CHECK(find_lexicon_entry(repaired, "unrelated-history")["syn_strong"].arr.size() == 1);
+  CHECK(repaired["checkpoint_version"].as_num() == 2);
+}
+
+static void test_validate_retry_and_fallback() {
+  LexiconFiles files;
+  files.write("input.json", lexicon_input(5));
+  FakeLlmClient fake;
+  fake.default_response = "[]";
+  fake.rules = {{"anchor|syn-0\n", ""}, {"anchor|syn-1\n", "invalid"},
+                {"anchor|syn-2\n", R"([{"a":"anchor","b":"syn-2","ok":true}])"},
+                {"anchor|syn-3\n", R"([{"a":"anchor","b":"syn-3","ok":false}])"}};
+  CHECK(validate_lexicon_json(fake, files.path("input.json"), files.path("out.json"), 1, 1) == 5);
+  Json result = find_lexicon_entry(files.read("out.json"), "anchor");
+  CHECK(result["syn_strong"].arr.size() == 3);
+  CHECK(result["syn_strong"].dump() == R"(["syn-0","syn-1","syn-2"])");
+  CHECK(fake.received.size() == 6);  // 仅空响应重试一次，malformed 不重试。
+}
+
+static void test_validate_without_strong_candidates() {
+  LexiconFiles files;
+  Json input = lexicon_input(0);
+  input["entries"].arr[0]["syn_near"] = Json::parse(R"([{"word":"nearby","score":0.6}])");
+  input["entries"].arr[0]["antonyms"] = Json::parse(R"(["opposite"])");
+  files.write("input.json", input);
+  FakeLlmClient fake;
+  CHECK(validate_lexicon_json(fake, files.path("input.json"), files.path("out.json"), 1, 1) == 0);
+  Json output = files.read("out.json");
+  CHECK(output["entries"].dump() == input["entries"].dump());
+  CHECK(fake.received.empty());
+}
+
+static void test_score_retry_defaults_and_deduplication() {
+  LexiconFiles files;
+  Json input = lexicon_input(5);
+  input["entries"].arr[0]["syn_strong"].push(Json::string("syn-0"));
+  input["entries"].arr[0]["syn_near"] = Json::parse(R"([{"word":"syn-2"},{"word":"syn-5"}])");
+  files.write("input.json", input);
+  FakeLlmClient fake;
+  fake.default_response = "[]";
+  fake.rules = {{"anchor|syn-0\n", ""}, {"anchor|syn-1\n", "invalid"},
+                {"anchor|syn-2\n", R"([{"a":"anchor","b":"syn-2","score":9}])"},
+                {"anchor|syn-3\n", R"([{"a":"anchor","b":"syn-3","score":"invalid"}])"}};
+  CHECK(score_word_sims(fake, files.path("input.json"), files.path("out.json"), 1, 1) == 6);
+  Json row = files.read("out.json")["sims"]["anchor"];
+  CHECK(row.obj.size() == 6);
+  CHECK_NEAR(row["syn-2"].as_num(), 0.9, 1e-9);
+  for (const char* other : {"syn-0", "syn-1", "syn-3", "syn-4", "syn-5"})
+    CHECK_NEAR(row[other].as_num(), 0.5, 1e-9);
+  CHECK(fake.received.size() == 7);
+}
+
+class RetryOnceLexiconClient : public FakeLlmClient {
+ public:
+  int calls = 0;
+  std::string chat(const std::vector<ChatMessage>& messages, const ChatOptions& options) override {
+    if (++calls == 1) return "";
+    return FakeLlmClient::chat(messages, options);
+  }
+};
+
+static void test_build_lexicon_resume_and_legacy_fields() {
+  LexiconFiles files;
+  files.write("vocab.json", Json::parse(R"({"conv_vocab_top":[["walk",5],["run",3],["a",90],["can't",80]]})"));
+  Json previous = Json::object();
+  previous["entries"] = Json::array();
+  previous["entries"].push(lexicon_entry("walk", 1));
+  files.write("out.json", previous);
+  RetryOnceLexiconClient fake;
+  fake.default_response = R"({"run":{"synonyms":["running"],"related":[{"word":"jog"}],"antonyms":["stop"]}})";
+  CHECK(build_lexicon_json(fake, {files.path("vocab.json")}, files.path("out.json"), 10, 1, 1) == 1);
+  Json result = files.read("out.json");
+  CHECK(result["entries"].arr.size() == 2);
+  Json run = find_lexicon_entry(result, "run");
+  CHECK(run["syn_strong"].dump() == R"(["running"])");
+  CHECK(run["antonyms"].dump() == R"(["stop"])");
+  CHECK(run["syn_near"].dump() == R"([{"word":"jog","score":0.5}])");
+  CHECK(fake.calls == 2);
+  CHECK(build_lexicon_json(fake, {files.path("vocab.json")}, files.path("out.json"), 10, 1, 1) == 0);
+  CHECK(fake.calls == 2);
+  CHECK(build_lexicon_json(fake, {files.path("vocab.json")}, files.path("out.json"), 10, 0, 1) == -1);
+  CHECK(validate_lexicon_json(fake, files.path("out.json"), files.path("unused.json"), 0, 1) == -1);
+  CHECK(score_word_sims(fake, files.path("out.json"), files.path("unused.json"), 0, 1) == -1);
+}
+
+static void test_extraction_field_defaults() {
+  FakeLlmClient fake;
+  fake.default_response = R"([{"type":null,"entities":[{"surface":"Alice"},{"surface":""},{"surface":7},{"surface":"X","role":"","type":null}],"keywords":[{"word":"unknown","category":"bad"},{"word":"known","category":"action"},{"category":"attr"}],"attributes":[{"entity":"Alice","slot":"residence","value":"Paris"},{"entity":"Alice","value":"Paris"},{"entity":"Alice","slot":"age","value":7}]}])";
+  RuleExtractor fallback;
+  LlmExtractor extractor(&fake, &fallback);
+  const auto result = extractor.extract_session({{"", "original text"}});
+  CHECK(result.size() == 1);
+  if (result.empty()) return;
+  const auto& item = result.front();
+  CHECK(item.event.type == "generic" && item.event.text == "original text");
+  CHECK(item.entities.size() == 2);
+  if (item.entities.size() == 2) {
+    CHECK(item.entities[0].role == "人物" && item.entities[0].entity_type == "person");
+    CHECK(item.entities[1].role.empty() && item.entities[1].entity_type == "person");
+  }
+  CHECK(item.keywords.size() == 2);
+  if (item.keywords.size() == 2) {
+    CHECK(item.keywords[0].category == "attr");
+    CHECK(item.keywords[1].category == "action");
+  }
+  CHECK(item.attributes.size() == 1);
+}
+
 int main() {
   test_client_cache_and_retry();
   test_chat_batch();
@@ -236,6 +509,15 @@ int main() {
   test_fake_pipeline_e2e();
   test_two_stage_aggregate();
   test_extract_batch();
+  test_lexicon_cross_chunk();
+  test_validate_word_checkpoint_resume();
+  test_score_word_checkpoint_resume();
+  test_legacy_lexicon_checkpoint_repair();
+  test_validate_retry_and_fallback();
+  test_validate_without_strong_candidates();
+  test_score_retry_defaults_and_deduplication();
+  test_build_lexicon_resume_and_legacy_fields();
+  test_extraction_field_defaults();
   // 集成测试（真实 API）默认跳过
   if (std::getenv("AME_RUN_LLM_IT")) {
     auto client = DeepSeekClient::from_config("bench/config/deepseek.local.json",

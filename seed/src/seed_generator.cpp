@@ -27,7 +27,6 @@
 #include "ame/seed/seed_generator.h"
 
 #include "ame/extractor/extractor.h"
-#include "ame/core/json.h"
 #include "ame/keyword/keyword_manager.h"
 #include "ame/storage/storage.h"
 #include "ame/vector/vector_service.h"
@@ -35,394 +34,356 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstring>
-#include <fstream>
-#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace ame {
 
-// ---- 词形家族铸边 generator（第六轮：词干"改写"退役后的等价物， graded 化）----
-// 从词 w（视作 lemma）正向铸造高频屈折家族：所有格/复数 0.95、过去/进行 0.9；
-// 不规则变化不处理；e-尾只加 d（made→mad 类过度生成靠"不生成"避免）。
-static void mint_inflections(const std::string& w,
-                             std::vector<std::pair<std::string, float>>& out) {
-  if (w.size() < 3 || w.size() > 20) return;
-  auto is_ascii_alpha = [](const std::string& s) {
-    for (unsigned char c : s)
-      if (c >= 128 || !std::isalpha(c)) return false;
-    return true;
-  };
-  if (!is_ascii_alpha(w)) return;
-  auto add = [&](std::string form, float sc) {
-    if (form.size() >= 3 && form != w) out.emplace_back(std::move(form), sc);
-  };
-  char last = w.back();
-  bool es_pl = (last == 's' || last == 'x' || last == 'z' ||
-                w.size() >= 2 && (w.compare(w.size() - 2, 2, "ch") == 0 ||
-                                  w.compare(w.size() - 2, 2, "sh") == 0));
-  bool consonant_y = (last == 'y' && w.size() >= 2 &&
-                      !std::strchr("aeiou", w[w.size() - 2]));
-  // 所有格/复数档 0.95
-  add(w + "'s", 0.95f);
-  if (es_pl) add(w + "es", 0.95f);
-  else if (consonant_y) add(w.substr(0, w.size() - 1) + "ies", 0.95f);
-  else add(w + "s", 0.95f);
-  // 过去/进行档 0.9（e 尾：去 e +ing / 直接 +d；CVC 短词双写尾字母；
-  // make→made 类不规则不处理——"maked" 边无害，文本中不存在）
-  bool e_tail = last == 'e';
-  bool dbl = w.size() >= 3 && !std::strchr("aeiou", last) &&
-             std::strchr("aeiou", w[w.size() - 2]) &&
-             !std::strchr("aeiou", w[w.size() - 3]) && last != 'w' && last != 'x';
-  add(e_tail ? w + "d" : dbl ? w + last + "ed" : w + "ed", 0.9f);
-  add(e_tail ? w.substr(0, w.size() - 1) + "ing" : dbl ? w + last + "ing" : w + "ing",
-      0.9f);
-}
+namespace {
+using Words = std::unordered_set<std::string>;
+using Frequencies = std::unordered_map<std::string, int>;
+using Expansions = std::unordered_map<std::string, std::pair<std::string, double>>;
+using Events = std::vector<const Node*>;
+using TokenizedEvents = std::vector<Words>;
 
-// 构造函数：保存 M9 存储、M13 向量服务、M3 关键词管理器的引用，M1 提取器可为空
+// Ties retain the earlier channel; only a larger weight replaces its source.
+void add_seed(SeedSet& seeds, const std::string& uid, double weight,
+              const std::string& source) {
+  if (uid.empty()) return;
+  auto existing = std::find_if(seeds.begin(), seeds.end(),
+                               [&](const Seed& seed) { return seed.node_uid == uid; });
+  if (existing == seeds.end()) { seeds.push_back({uid, weight, source}); return; }
+  if (weight > existing->weight) {
+    existing->weight = weight;
+    existing->source = source;
+  }
+}
+void add_node_seed(SeedSet& seeds, const Node* node, const std::string& source) {
+  if (node) add_seed(seeds, node->uid, 1.0, source);
+}
+void collect_hard_seeds(const SeedQuery& q, Storage& storage, KeywordManager& kw,
+                        SeedSet& seeds) {
+  if (!q.uid.empty()) add_node_seed(seeds, storage.get_node(q.uid), "hard");
+  for (const auto& [key, value] : q.identifiers)
+    add_node_seed(seeds, storage.find_by_attr(NodeKind::Entity, "id:" + key, value), "hard");
+  for (const auto& word : q.keywords)
+    add_node_seed(seeds, kw.find(kw.normalize(word)), "hard");
+}
+void collect_geo_seed(const SeedQuery& q, Storage& storage, SeedSet& seeds) {
+  if (!q.has_geo) return;
+  auto places = storage.geo_lookup(q.lat, q.lng, 1000.0);
+  if (places.empty()) return;
+  const Node& place = *places.front();
+  double distance = haversine_m(q.lat, q.lng, place.lat, place.lng);
+  add_seed(seeds, place.uid, std::max(0.3, 1.0 - distance / 1000.0), "geo");
+}
+void collect_entity_seed(const ExtractedEntity& entity, Storage& storage,
+                         KeywordManager& kw, SeedSet& seeds, Words& name_canons) {
+  std::string canon = kw.alias_of(entity.surface);
+  const Node* node = canon.empty() ? nullptr : storage.find_by_name(NodeKind::Entity, canon);
+  if (!node) node = storage.find_by_name(NodeKind::Entity, entity.surface);
+  add_node_seed(seeds, node, "text");
+  if (canon.empty()) return;
+  add_node_seed(seeds, kw.find(canon), "text");
+  name_canons.insert(canon);
+}
+Words collect_text_seeds(const std::string& text, IExtractor* extractor,
+                          Storage& storage, KeywordManager& kw, SeedSet& seeds) {
+  Words name_canons;
+  if (!extractor) return name_canons;
+  Extraction extracted = extractor->extract(text);
+  for (const auto& entity : extracted.entities)
+    collect_entity_seed(entity, storage, kw, seeds, name_canons);
+  for (const auto& keyword : extracted.keywords)
+    add_node_seed(seeds, kw.find(kw.normalize(keyword.word)), "text");
+  if (!extracted.place.name.empty())
+    add_node_seed(seeds, storage.find_by_name(NodeKind::Place, extracted.place.name), "text");
+  return name_canons;
+}
+void collect_soft_seeds(const SeedQuery& q, Storage& storage, VectorService& vec,
+                        SeedSet& seeds) {
+  Vec embedding = vec.embed(q.text);
+  for (const auto& [uid, similarity] : storage.ann_search(embedding, q.soft_topk)) {
+    if (similarity < q.soft_min_sim) continue;
+    add_seed(seeds, uid, similarity, "soft");
+  }
+}
+Words tokenize_ascii(const std::string& text) {
+  Words words;
+  std::string current;
+  auto flush = [&] {
+    if (current.size() >= 3) words.insert(current);
+    current.clear();
+  };
+  for (unsigned char ch : text) {
+    if (ch < 128 && std::isalnum(ch)) current += (char)std::tolower(ch);
+    else flush();
+  }
+  flush();
+  return words;
+}
+Words ascii_content(const std::string& text) {
+  static const Words stop = {
+      "the", "and", "for", "are", "was", "were", "has", "have", "had", "did",
+      "does", "what", "when", "where", "which", "who", "whom", "whose", "how",
+      "with", "from", "that", "this", "these", "those", "they", "them", "their",
+      "would", "could", "should", "about", "into", "your", "you", "his", "her",
+      "she", "him", "not", "but", "all", "any", "can", "will", "just"};
+  Words content;
+  for (const auto& word : tokenize_ascii(text))
+    if (!stop.count(word)) content.insert(word);
+  return content;
+}
+TokenizedEvents tokenize_events(const Events& events, const Words& content,
+                                Frequencies& frequencies) {
+  TokenizedEvents tokens;
+  tokens.reserve(events.size());
+  for (const Node* event : events) {
+    tokens.push_back(tokenize_ascii(event->text));
+    for (const auto& word : content)
+      if (tokens.back().count(word)) ++frequencies[word];
+  }
+  return tokens;
+}
+void add_variants(const std::vector<std::string>& variants, const std::string& word,
+                  const Words& content, Expansions& expansions) {
+  for (const auto& variant : variants)
+    if (!content.count(variant)) expansions[variant] = {word, 0.6};
+}
+bool has_direct_ascii_match(const std::string& word, const std::string& normalized,
+                             Storage& storage, KeywordManager& kw, Frequencies& df) {
+  bool direct = df[word] > 0 || df[normalized] > 0 || kw.find(normalized) != nullptr;
+  std::string capitalized = word;
+  capitalized[0] = (char)std::toupper((unsigned char)capitalized[0]);
+  return direct || storage.find_by_name(NodeKind::Entity, capitalized) != nullptr;
+}
+void expand_ascii_word(const std::string& word, const Words& content, bool conditional,
+                        Storage& storage, KeywordManager& kw, Frequencies& df,
+                        Expansions& expansions) {
+  const std::string normalized = kw.normalize(word);
+  if (conditional && has_direct_ascii_match(word, normalized, storage, kw, df)) return;
+  auto strong = kw.variants(normalized, 3);
+  if (!conditional || !strong.empty()) {
+    add_variants(strong, word, content, expansions);
+    return;
+  }
+  for (const auto& [variant, score] : kw.near_words(normalized, 3)) {
+    (void)score;
+    if (!content.count(variant)) expansions[variant] = {word, 0.4};
+  }
+}
+int token_frequency(const std::string& word, const TokenizedEvents& events) {
+  return (int)std::count_if(events.begin(), events.end(),
+                            [&](const Words& tokens) { return tokens.count(word) != 0; });
+}
+int substring_frequency(const std::string& word, const Events& events) {
+  return (int)std::count_if(events.begin(), events.end(), [&](const Node* event) {
+    return event->text.find(word) != std::string::npos;
+  });
+}
+struct LexicalWeights {
+  std::unordered_map<std::string, double> idf;
+  double total = 0;
+};
+double inverse_frequency(size_t event_count, const std::string& word,
+                          const Frequencies& frequencies) {
+  auto found = frequencies.find(word);
+  int frequency = found == frequencies.end() ? 0 : found->second;
+  return std::log(1.0 + (double)event_count / (1.0 + frequency));
+}
+template <typename Terms>
+LexicalWeights lexical_weights(const Terms& words, const Expansions& expansions,
+                                 size_t event_count, const Frequencies& frequencies) {
+  LexicalWeights weights;
+  for (const auto& word : words) {
+    weights.idf[word] = inverse_frequency(event_count, word, frequencies);
+    weights.total += weights.idf[word];
+  }
+  for (const auto& [variant, source] : expansions) {
+    (void)source;
+    weights.idf[variant] = inverse_frequency(event_count, variant, frequencies);
+  }
+  return weights;
+}
+struct LexicalScore {
+  int matches = 0;
+  bool rare_hit = false;
+  double sum = 0;
+  void add(const std::string& word, double weight) {
+    ++matches;
+    if (word.size() >= 6) rare_hit = true;
+    sum += weight;
+  }
+  double weight(double total) const { return 0.3 + 0.7 * (total > 0 ? sum / total : 0); }
+};
+template <typename Terms, typename Match>
+LexicalScore score_lexical_terms(const Terms& words, const Expansions& expansions,
+                                  const LexicalWeights& weights, Match matches) {
+  LexicalScore score;
+  for (const auto& word : words)
+    if (matches(word)) score.add(word, weights.idf.at(word));
+  for (const auto& [variant, source] : expansions)
+    if (matches(variant)) score.add(variant, source.second * weights.idf.at(variant));
+  return score;
+}
+void collect_ascii_lexical(const SeedQuery& q, Storage& storage, KeywordManager& kw,
+                            SeedSet& seeds) {
+  Words content = ascii_content(q.text);
+  if (content.empty()) return;
+  auto events = storage.nodes_of_kind(NodeKind::Event);
+  Frequencies frequencies;
+  auto tokens = tokenize_events(events, content, frequencies);
+  Expansions expansions;
+  for (const auto& word : content)
+    expand_ascii_word(word, content, q.conditional_normalize, storage, kw, frequencies, expansions);
+  for (const auto& [variant, source] : expansions) {
+    (void)source;
+    frequencies[variant] += token_frequency(variant, tokens);
+  }
+  auto weights = lexical_weights(content, expansions, events.size(), frequencies);
+  std::vector<std::pair<double, std::string>> scored;
+  for (size_t i = 0; i < events.size(); ++i) {
+    auto score = score_lexical_terms(content, expansions, weights,
+                                     [&](const std::string& word) { return tokens[i].count(word); });
+    if (score.matches >= 2 || (score.matches == 1 && score.rare_hit))
+      scored.emplace_back(score.weight(weights.total), events[i]->uid);
+  }
+  std::sort(scored.begin(), scored.end(), std::greater<>());
+  for (size_t i = 0; i < scored.size() && i < (size_t)q.lex_topk; ++i)
+    add_seed(seeds, scored[i].second, scored[i].first, "lex");
+}
+std::vector<std::string> cjk_content(const std::string& text, IExtractor* extractor,
+                                     const Words& name_canons) {
+  Extraction extracted = extractor ? extractor->extract(text) : Extraction{};
+  std::vector<std::string> words;
+  for (const auto& keyword : extracted.keywords)
+    if (!keyword.word.empty() && (unsigned char)keyword.word[0] >= 128)
+      words.push_back(keyword.word);
+  for (const auto& canon : name_canons)
+    if (std::find(words.begin(), words.end(), canon) == words.end()) words.push_back(canon);
+  return words;
+}
+void expand_cjk_word(const std::string& word, const Events& events, bool conditional,
+                      KeywordManager& kw, Frequencies& df, Expansions& expansions) {
+  std::string normalized = kw.normalize(word);
+  df[word] += substring_frequency(word, events);
+  bool direct = df[word] > 0 || kw.find(normalized) != nullptr;
+  if (conditional && direct) return;
+  for (const auto& variant : kw.variants(normalized, 8)) {
+    if (variant == word) continue;
+    expansions[variant] = {word, 0.6};
+    // Preserve per-query-word accumulation for overlapping synonym groups.
+    df[variant] += substring_frequency(variant, events);
+  }
+}
+void collect_cjk_words(const SeedQuery& q, const std::vector<std::string>& words,
+                        const Events& events, KeywordManager& kw, SeedSet& seeds) {
+  Frequencies frequencies;
+  Expansions expansions;
+  for (const auto& word : words)
+    expand_cjk_word(word, events, q.conditional_normalize, kw, frequencies, expansions);
+  auto weights = lexical_weights(words, expansions, events.size(), frequencies);
+  for (const Node* event : events) {
+    auto score = score_lexical_terms(words, expansions, weights, [&](const std::string& word) {
+      return event->text.find(word) != std::string::npos;
+    });
+    if (score.matches >= 1 && score.sum > 0)
+      add_seed(seeds, event->uid, score.weight(weights.total), "lex");
+  }
+}
+void append_codepoint(unsigned cp, std::string& out) {
+  if (cp < 0x80) { out += (char)cp; return; }
+  if (cp < 0x800) {
+    out += (char)(0xC0 | (cp >> 6));
+  } else if (cp < 0x10000) {
+    out += (char)(0xE0 | (cp >> 12));
+    out += (char)(0x80 | ((cp >> 6) & 0x3F));
+  } else {
+    out += (char)(0xF0 | (cp >> 18));
+    out += (char)(0x80 | ((cp >> 12) & 0x3F));
+    out += (char)(0x80 | ((cp >> 6) & 0x3F));
+  }
+  out += (char)(0x80 | (cp & 0x3F));
+}
+size_t codepoint_prefix(unsigned char ch, unsigned& cp) {
+  if (ch < 0x80) { cp = ch; return 1; }
+  if ((ch & 0xE0) == 0xC0) { cp = ch & 0x1F; return 2; }
+  if ((ch & 0xF0) == 0xE0) { cp = ch & 0x0F; return 3; }
+  if ((ch & 0xF8) == 0xF0) { cp = ch & 0x07; return 4; }
+  return 0;
+}
+bool read_codepoint(const std::string& text, size_t& offset, unsigned& cp) {
+  size_t length = codepoint_prefix((unsigned char)text[offset], cp);
+  bool valid = length != 0 && length <= text.size() - offset;
+  for (size_t i = 1; valid && i < length; ++i) {
+    unsigned char ch = (unsigned char)text[offset + i];
+    if ((ch & 0xC0) != 0x80) valid = false;
+    else cp = (cp << 6) | (ch & 0x3F);
+  }
+  offset += valid ? length : 1;
+  return valid;
+}
+std::vector<std::string> cjk_grams(const std::string& text) {
+  std::vector<unsigned> codepoints;
+  for (size_t offset = 0; offset < text.size();) {
+    unsigned cp = 0;
+    if (read_codepoint(text, offset, cp) && cp > 0x2E7F) codepoints.push_back(cp);
+  }
+  std::vector<std::string> grams;
+  for (size_t i = 0; i + 1 < codepoints.size(); ++i) {
+    std::string gram;
+    append_codepoint(codepoints[i], gram);
+    append_codepoint(codepoints[i + 1], gram);
+    grams.push_back(gram);
+  }
+  if (grams.empty() && codepoints.size() == 1) {
+    std::string gram;
+    append_codepoint(codepoints[0], gram);
+    grams.push_back(gram);
+  }
+  return grams;
+}
+void collect_cjk_fallback(const std::string& text, Storage& storage, SeedSet& seeds) {
+  auto grams = cjk_grams(text);
+  if (grams.empty()) return;
+  auto events = storage.nodes_of_kind(NodeKind::Event);
+  Frequencies frequencies;
+  for (const auto& gram : grams) frequencies[gram] += substring_frequency(gram, events);
+  const Expansions no_expansions;
+  auto weights = lexical_weights(grams, no_expansions, events.size(), frequencies);
+  for (const Node* event : events) {
+    auto score = score_lexical_terms(grams, no_expansions, weights, [&](const std::string& gram) {
+      return event->text.find(gram) != std::string::npos;
+    });
+    if ((score.matches >= 2 || grams.size() == 1) && score.sum > 0)
+      add_seed(seeds, event->uid, score.weight(weights.total), "lex");
+  }
+}
+void collect_cjk_lexical(const SeedQuery& q, IExtractor* extractor, Storage& storage,
+                          KeywordManager& kw, const Words& name_canons, SeedSet& seeds) {
+  auto words = cjk_content(q.text, extractor, name_canons);
+  if (words.empty()) {
+    collect_cjk_fallback(q.text, storage, seeds);
+    return;
+  }
+  auto events = storage.nodes_of_kind(NodeKind::Event);
+  collect_cjk_words(q, words, events, kw, seeds);
+}
+}  // namespace
+
 SeedGenerator::SeedGenerator(Storage& storage, VectorService& vec, KeywordManager& kw,
                              IExtractor* extractor)
     : storage_(storage), vec_(vec), kw_(kw), extractor_(extractor) {}
 
-/*
- * gen_seeds 伪代码：
- * 步骤1：定义合并入口 add(uid, w, src)——uid 为空直接忽略；线性扫描已有种子，
- *        若同 uid 已存在则仅当新权重更大时更新权重与来源，否则追加新种子。
- * 步骤2：硬种子通道（均 weight=1.0，跳过向量通道）：
- *        - 若 query.uid 非空且在 M9 中存在该节点，加入为 hard 种子；
- *        - 逐条强标识符，按 "id:键"=值 在实体节点中精确查找，命中加入；
- *        - 逐个关键词经 M3 归一化后精确查找，命中加入。
- * 步骤3：坐标种子：若带坐标，geo_lookup 取 1km 内最近 Place；若存在则按
- *        haversine 距离 d 赋权 max(0.3, 1 - d/1000)，来源标记 geo。
- * 步骤4：自由文本通道（text 非空时）：
- *        - 若 M1 提取器可用：先 extract 文本，其中实体、关键词、地点名
- *          分别经名称精确查找/关键词查找，命中即视为硬种子（weight=1.0，
- *          来源 text）；
- *        - 软种子：M13 embed 文本得向量，M9 ann_search 召回 topK，
- *          若相似度 < soft_min_sim 则丢弃，否则以相似度为权重加入 soft。
- * 步骤5：返回合并去重后的种子集合。
- */
 SeedSet SeedGenerator::gen_seeds(const SeedQuery& q) {
   SeedSet seeds;
-  auto add = [&](const std::string& uid, double w, const std::string& src) {
-    if (uid.empty()) return;
-    for (auto& s : seeds) {  // 合并去重，取最大权重
-      if (s.node_uid == uid) {
-        if (w > s.weight) { s.weight = w; s.source = src; }
-        return;
-      }
-    }
-    seeds.push_back({uid, w, src});
-  };
-
-  // ---- 硬种子（weight=1.0，跳过向量通道）----
-  if (!q.uid.empty() && storage_.get_node(q.uid)) add(q.uid, 1.0, "hard");
-  for (auto& kv : q.identifiers) {
-    const Node* n = storage_.find_by_attr(NodeKind::Entity, "id:" + kv.first, kv.second);
-    if (n) add(n->uid, 1.0, "hard");
-  }
-  for (auto& w : q.keywords) {
-    const Node* n = kw_.find(kw_.normalize(w));
-    if (n) add(n->uid, 1.0, "hard");
-  }
-
-  // ---- 坐标种子：geo_lookup 最近 Place ----
-  if (q.has_geo) {
-    auto places = storage_.geo_lookup(q.lat, q.lng, 1000.0);
-    if (!places.empty()) {
-      double d = haversine_m(q.lat, q.lng, places.front()->lat, places.front()->lng);
-      add(places.front()->uid, std::max(0.3, 1.0 - d / 1000.0), "geo");
-    }
-  }
-
-  // ---- 自由文本：先过 M1 提取，再两路并行 ----
-  if (!q.text.empty()) {
-    std::unordered_set<std::string> name_canons;  // 人名归一：alias_of 命中的 canonical 集合
-    if (extractor_) {
-      Extraction ex = extractor_->extract(q.text);
-      for (auto& e : ex.entities) {
-        // 人名/专名归一（--name-alias 域）：称呼/昵称类实体词面先经别名表精确命中
-        // 判定（alias_of，区别于 normalize 的小写化）。命中时：
-        // ① canonical 实体节点入硬种子（INVOLVES 通道；CONTAINS/INVOLVES 传导弱，
-        //    实体种子只作补充，见 ②）；
-        // ② canonical 词面注入下方 CJK 词法通道的扩展集合（name_canons）——事件按
-        //    变体子串直接成种子（lex 权重），这是称呼类变体达事件的主通道
-        //    （如查询"小李说过什么"圈定"李建国"全部轮次）。
-        // 未加载姓名别名表时 alias_of 必返回空串，行为与历史逐行一致（零回归）。
-        std::string canon = kw_.alias_of(e.surface);
-        const Node* n = canon.empty() ? nullptr
-                                      : storage_.find_by_name(NodeKind::Entity, canon);
-        if (!n) n = storage_.find_by_name(NodeKind::Entity, e.surface);
-        if (n) add(n->uid, 1.0, "text");  // 文本中的实体命中 = 硬种子
-        if (!canon.empty()) {
-          const Node* k = kw_.find(canon);
-          if (k) add(k->uid, 1.0, "text");
-          name_canons.insert(canon);
-        }
-      }
-      for (auto& k : ex.keywords) {
-        const Node* n = kw_.find(kw_.normalize(k.word));
-        if (n) add(n->uid, 1.0, "text");
-      }
-      if (!ex.place.name.empty()) {
-        const Node* n = storage_.find_by_name(NodeKind::Place, ex.place.name);
-        if (n) add(n->uid, 1.0, "text");
-      }
-    }
-    // 软种子：embed → ANN topK，相似度 <0.5 丢弃，按相似度赋权
-    Vec emb = vec_.embed(q.text);
-    for (auto& [uid, sim] : storage_.ann_search(emb, q.soft_topk)) {
-      if (sim < q.soft_min_sim) continue;
-      add(uid, sim, "soft");
-    }
-
-    // 词法种子（lex）：查询内容词与事件原文的词面重叠（对哈希向量语义弱的补充通道，
-    // 通用机制，BM25-lite：命中词按 IDF 加权，罕见词区分度高）。
-    // 伪代码：
-    //   步骤1：查询切词——ASCII 小写、长度≥3、去停用词，得内容词集合；
-    //   步骤2：第一遍扫描全部 Event 节点文本（同样切词），统计每个查询词的文档频数 df；
-    //   步骤3：第二遍按 Σ命中idf/Σ查询idf 归一打分（idf=log(1+N/df)），
-    //          收录条件 m≥2 或（m==1 且词长≥6 的罕见词）；
-    //   步骤4：权重 = 0.3 + 0.7×归一分，按权重取 top10。
-    {
-      static const std::unordered_set<std::string> kLexStop = {
-          "the", "and", "for", "are", "was", "were", "has", "have", "had", "did",
-          "does", "what", "when", "where", "which", "who", "whom", "whose", "how",
-          "with", "from", "that", "this", "these", "those", "they", "them", "their",
-          "would", "could", "should", "about", "into", "your", "you", "his", "her",
-          "she", "him", "not", "but", "all", "any", "can", "will", "just"};
-      auto tokenize = [](const std::string& text) {
-        std::unordered_set<std::string> out;
-        std::string cur;
-        auto flush = [&] {
-          if (cur.size() >= 3) out.insert(cur);
-          cur.clear();
-        };
-        for (unsigned char c : text) {
-          if (c < 128 && std::isalnum(c)) cur += (char)std::tolower(c);
-          else flush();
-        }
-        flush();
-        return out;
-      };
-      auto qtoks = tokenize(q.text);
-      std::unordered_set<std::string> qcontent;
-      for (auto& w : qtoks)
-        if (!kLexStop.count(w)) qcontent.insert(w);
-      if (!qcontent.empty()) {
-        auto events = storage_.nodes_of_kind(NodeKind::Event);
-        std::vector<std::unordered_set<std::string>> etoks;
-        etoks.reserve(events.size());
-        std::unordered_map<std::string, int> df;
-        for (auto* n : events) {
-          etoks.push_back(tokenize(n->text));
-          for (auto& w : qcontent)
-            if (etoks.back().count(w)) ++df[w];
-        }
-        // 查询侧词典扩展（条件归一）：
-        //   默认（无条件）：每个内容词经 M3 反向别名取 ≤3 个同义词形，×0.6 打折；
-        //   条件归一：有直接命中（关键词节点或事件词面 df>0）保持原词；人名不扩展；
-        //   无命中 → strong 别名 ×0.6，无 strong 再降级 syn_near ×0.4（≤3 个）。
-        std::unordered_map<std::string, std::pair<std::string, double>> expand_of;  // 扩展词 -> (原词, 折扣)
-        {
-          for (auto& w : qcontent) {
-            // R2 查询侧：查询词先过 M3 归一（词干+别名）， loves→love 后取 love 的别名组，
-            // 词形变化（loves/loved）作为别名精确匹配事件词面
-            const std::string nw = kw_.normalize(w);
-            if (q.conditional_normalize) {
-              bool direct = df[w] > 0 || df[nw] > 0 || kw_.find(nw) != nullptr;
-              std::string capw = w;
-              capw[0] = (char)std::toupper((unsigned char)capw[0]);
-              bool is_person = storage_.find_by_name(NodeKind::Entity, capw) != nullptr;
-              if (direct || is_person) continue;
-              auto strong = kw_.variants(nw, 3);
-              if (!strong.empty()) {
-                for (auto& v : strong)
-                  if (!qcontent.count(v)) expand_of[v] = {w, 0.6};
-              } else {
-                for (auto& [v, sc] : kw_.near_words(nw, 3))
-                  if (!qcontent.count(v)) expand_of[v] = {w, 0.4};
-              }
-            } else {
-              for (auto& v : kw_.variants(nw, 3))
-                if (!qcontent.count(v)) expand_of[v] = {w, 0.6};
-            }
-          }
-        }
-        for (auto& [v, w] : expand_of)
-          for (auto& t : etoks)
-            if (t.count(v)) ++df[v];
-        double idf_sum = 0;
-        std::unordered_map<std::string, double> idf;
-        for (auto& w : qcontent) {
-          idf[w] = std::log(1.0 + (double)events.size() / (1.0 + df[w]));
-          idf_sum += idf[w];
-        }
-        for (auto& [v, w] : expand_of)
-          idf[v] = std::log(1.0 + (double)events.size() / (1.0 + df[v]));
-        std::vector<std::pair<double, std::string>> scored;  // (weight, event uid)
-        for (size_t i = 0; i < events.size(); ++i) {
-            // ---- 历史路径（word_edges 为空 = 行为逐行不变）----
-            int m = 0;
-            bool rare_hit = false;
-            double s = 0;
-            for (auto& w : qcontent)
-              if (etoks[i].count(w)) {
-                ++m;
-                s += idf[w];
-                if (w.size() >= 6) rare_hit = true;
-              }
-            for (auto& [v, ws] : expand_of)
-              if (etoks[i].count(v)) {
-                ++m;  // 扩展命中同样计入（条件归一兜底依赖此路径）
-                if (v.size() >= 6) rare_hit = true;
-                s += ws.second * idf[v];  // 扩展命中按 strong/near 折扣
-              }
-            if (m >= 2 || (m == 1 && rare_hit)) {
-              double w = 0.3 + 0.7 * (idf_sum > 0 ? s / idf_sum : 0);
-              scored.emplace_back(w, events[i]->uid);
-            }
-        }
-        std::sort(scored.begin(), scored.end(), std::greater<>());
-        for (size_t i = 0; i < scored.size() && i < (size_t)q.lex_topk; ++i)
-          add(scored[i].second, scored[i].first, "lex");
-      }
-
-      // CJK 词法种子（中文无分词器：以 M1 词典提取的中文词为内容词，
-      // 子串匹配事件原文；同义扩展经别名表，权重规则与 ASCII 通道一致）
-      {
-        Extraction cex = extractor_ ? extractor_->extract(q.text) : Extraction{};
-        std::vector<std::string> cjks;
-        for (auto& k : cex.keywords)
-          if (!k.word.empty() && (unsigned char)k.word[0] >= 128) cjks.push_back(k.word);
-        // 人名归一：alias_of 命中的 canonical 词面并入内容词——提问里的称呼/昵称
-        // （老X/小X 提取为实体、不作关键词）由此把全变体轮次直接种子化；canonical
-        // 自身经全变体扩展（variants），覆盖非称呼变体（李经理/建国）轮次。
-        // name_canons 仅在别名表命中时非空（--name-alias 域），off 时零行为差。
-        for (auto& c : name_canons)
-          if (std::find(cjks.begin(), cjks.end(), c) == cjks.end()) cjks.push_back(c);
-        if (!cjks.empty()) {
-          auto events = storage_.nodes_of_kind(NodeKind::Event);
-          std::unordered_map<std::string, int> df;
-          std::unordered_map<std::string, std::pair<std::string, double>> expand_of;
-          for (auto& w : cjks) {
-            std::string nw = kw_.normalize(w);
-            for (auto* n : events)
-              if (n->text.find(w) != std::string::npos) ++df[w];
-            bool direct = df[w] > 0 || kw_.find(nw) != nullptr;
-            if (!q.conditional_normalize || !direct) {
-              for (auto& v : kw_.variants(nw, 8))  // CJK 同义组整体扩展（cap 放宽）
-                if (v != w) {
-                  expand_of[v] = {w, 0.6};
-                  for (auto* n : events)
-                    if (n->text.find(v) != std::string::npos) ++df[v];
-                }
-            }
-          }
-          double idf_sum = 0;
-          std::unordered_map<std::string, double> idf;
-          for (auto& w : cjks) {
-            idf[w] = std::log(1.0 + (double)events.size() / (1.0 + df[w]));
-            idf_sum += idf[w];
-          }
-          for (auto& [v, ws] : expand_of)
-            idf[v] = std::log(1.0 + (double)events.size() / (1.0 + df[v]));
-          for (auto* n : events) {
-            int m = 0;
-            double s = 0;
-            for (auto& w : cjks)
-              if (n->text.find(w) != std::string::npos) {
-                ++m;
-                s += idf[w];
-              }
-            for (auto& [v, ws] : expand_of)
-              if (n->text.find(v) != std::string::npos) {
-                ++m;
-                s += ws.second * idf[v];
-              }
-            if (m >= 1 && s > 0)  // CJK 词多为整词，m≥1 即收录
-              add(n->uid, 0.3 + 0.7 * (idf_sum > 0 ? s / idf_sum : 0), "lex");
-          }
-        } else {
-          // 词典未加载/Android 端等场景 M1 提不出中文词时，退回查询文本的
-          // CJK 字符二元组做子串匹配（不扩展同义词）；≥2 个二元组命中才收录，
-          // 防"的/是/了"周边二元组单命中噪声。纯兜底通道，词典在时不会走到。
-          std::vector<std::string> grams;
-          auto push_cp = [&](unsigned cp, std::string& out) {
-            if (cp < 0x80) out += (char)cp;
-            else if (cp < 0x800) {
-              out += (char)(0xC0 | (cp >> 6));
-              out += (char)(0x80 | (cp & 0x3F));
-            } else if (cp < 0x10000) {
-              out += (char)(0xE0 | (cp >> 12));
-              out += (char)(0x80 | ((cp >> 6) & 0x3F));
-              out += (char)(0x80 | (cp & 0x3F));
-            } else {
-              out += (char)(0xF0 | (cp >> 18));
-              out += (char)(0x80 | ((cp >> 12) & 0x3F));
-              out += (char)(0x80 | ((cp >> 6) & 0x3F));
-              out += (char)(0x80 | (cp & 0x3F));
-            }
-          };
-          std::vector<unsigned> cps;
-          for (size_t i = 0; i < q.text.size();) {
-            unsigned char c = (unsigned char)q.text[i];
-            unsigned cp;
-            size_t len;
-            if (c < 0x80) { cp = c; len = 1; }
-            else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; len = 2; }
-            else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
-            else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
-            else { ++i; continue; }
-            bool ok = i + len <= q.text.size();
-            for (size_t j = 1; ok && j < len; ++j) {
-              unsigned char cc = (unsigned char)q.text[i + j];
-              if ((cc & 0xC0) != 0x80) ok = false;
-              else cp = (cp << 6) | (cc & 0x3F);
-            }
-            i += ok ? len : 1;
-            if (ok && cp > 0x2E7F) cps.push_back(cp);
-          }
-          for (size_t i = 0; i + 1 < cps.size(); ++i) {
-            std::string g;
-            push_cp(cps[i], g);
-            push_cp(cps[i + 1], g);
-            grams.push_back(g);
-          }
-          if (grams.empty() && cps.size() == 1) {
-            std::string g;
-            push_cp(cps[0], g);
-            grams.push_back(g);
-          }
-          if (!grams.empty()) {
-            auto events = storage_.nodes_of_kind(NodeKind::Event);
-            std::unordered_map<std::string, int> df;
-            for (auto& g : grams)
-              for (auto* n : events)
-                if (n->text.find(g) != std::string::npos) ++df[g];
-            double idf_sum = 0;
-            std::unordered_map<std::string, double> idf;
-            for (auto& g : grams) {
-              idf[g] = std::log(1.0 + (double)events.size() / (1.0 + df[g]));
-              idf_sum += idf[g];
-            }
-            for (auto* n : events) {
-              int m = 0;
-              double s = 0;
-              for (auto& g : grams)
-                if (n->text.find(g) != std::string::npos) {
-                  ++m;
-                  s += idf[g];
-                }
-              if ((m >= 2 || grams.size() == 1) && s > 0)
-                add(n->uid, 0.3 + 0.7 * (idf_sum > 0 ? s / idf_sum : 0), "lex");
-            }
-          }
-        }
-      }
-    }
-  }
+  collect_hard_seeds(q, storage_, kw_, seeds);
+  collect_geo_seed(q, storage_, seeds);
+  if (q.text.empty()) return seeds;
+  auto name_canons = collect_text_seeds(q.text, extractor_, storage_, kw_, seeds);
+  collect_soft_seeds(q, storage_, vec_, seeds);
+  collect_ascii_lexical(q, storage_, kw_, seeds);
+  collect_cjk_lexical(q, extractor_, storage_, kw_, name_canons, seeds);
   return seeds;
 }
 

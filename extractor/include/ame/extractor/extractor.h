@@ -96,10 +96,12 @@ class RuleExtractor : public IExtractor {
   void ac_stats(size_t& nodes, size_t& edges, size_t& approx_bytes) const;
 
   // AC 二进制持久化：dump 为紧凑二进制（magic+版本+词典校验），load 直接建结构
-  // 跳过逐词插入与 BFS。load 校验词典 (size,mtime)，不一致返回 false 由调用方重建。
+  // 跳过逐词插入与 BFS。load 校验词典和缓存结构；失败返回 false 并保留现有自动机。
+  // 缓存上限：256 MiB、2^21 个词条、2^23 个节点/转移边；超限视为缓存无效。
   bool ac_save(const std::string& cache_path, uint64_t dict_size, uint64_t dict_mtime) const;
   bool ac_load(const std::string& cache_path, uint64_t dict_size, uint64_t dict_mtime);
-  // 带缓存的词典加载：cache 有效则直接加载（跳过构建），否则解析词典构建后写 cache
+  // 带缓存的词典加载：成功后替换 AC 词典；缓存无效则隔离重建后写回 cache。
+  // 缓存读取或重建失败时保留旧词典；追加词典请使用 load_keyword_dict。
   int load_keyword_dict_cached(const std::string& path, const std::string& category,
                                int cap, const std::string& cache_path);
 
@@ -125,6 +127,7 @@ class RuleExtractor : public IExtractor {
   void ac_insert(uint32_t node, const uint32_t* cps, size_t n, int word_idx);
   static int ac_find(const AcNode& nd, uint32_t cp);  // 二分查转移，无则 -1
   void ac_build_fail();
+  void swap_ac_state(RuleExtractor& other) noexcept;
 };
 
 }  // namespace ame

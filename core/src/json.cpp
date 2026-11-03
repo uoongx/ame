@@ -11,6 +11,7 @@
 
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <iomanip>
 #include <locale>
 #include <sstream>
@@ -105,7 +106,7 @@ static void dump_esc(const std::string& s, std::string& out) {
 
 // 伪代码（递归序列化）：
 //   步骤1：按 kind 分派——Null/Bool 写字面量；Str 走 dump_esc；
-//   步骤2：Num 若为整数值且 |x|<1e15 用 %lld 输出，否则用 %.9g；
+//   步骤2：Num 若为整数值且 |x|<1e15 用十进制整数输出，否则保留 9 位有效数字；
 //   步骤3：Arr/Obj 递归序列化子元素，逗号分隔，方/花括号闭合。
 static void dump_number(double number, std::string& out) {
   if (!std::isfinite(number)) throw std::invalid_argument("JSON numbers must be finite");
@@ -120,7 +121,9 @@ static void dump_number(double number, std::string& out) {
   out += formatted.str();
 }
 
-static void dump_rec(const Json& j, std::string& out) {
+static void dump_rec(const Json& j, std::string& out, size_t depth) {
+  if ((j.kind == Json::Arr || j.kind == Json::Obj) && depth >= Json::kMaxNestingDepth)
+    throw std::length_error("JSON nesting depth exceeds limit");
   switch (j.kind) {
     case Json::Null: out += "null"; break;
     case Json::Bool: out += j.b ? "true" : "false"; break;
@@ -130,7 +133,7 @@ static void dump_rec(const Json& j, std::string& out) {
       out += '[';
       for (size_t i = 0; i < j.arr.size(); ++i) {
         if (i) out += ',';
-        dump_rec(j.arr[i], out);
+        dump_rec(j.arr[i], out, depth + 1);
       }
       out += ']';
       break;
@@ -141,7 +144,7 @@ static void dump_rec(const Json& j, std::string& out) {
         if (i) out += ',';
         dump_esc(j.obj[i].first, out);
         out += ':';
-        dump_rec(j.obj[i].second, out);
+        dump_rec(j.obj[i].second, out, depth + 1);
       }
       out += '}';
       break;
@@ -152,11 +155,35 @@ static void dump_rec(const Json& j, std::string& out) {
 // 序列化入口：创建空串，递归输出后返回。
 std::string Json::dump() const {
   std::string out;
-  dump_rec(*this, out);
+  dump_rec(*this, out, 0);
   return out;
 }
 
 // ---------- parse ----------
+// Keep the parser's historical permissive escape handling: an unknown hex
+// digit contributes zero, and unknown simple escapes keep the escaped byte.
+static unsigned hex_digit(char c) {
+  if (c >= '0' && c <= '9') return static_cast<unsigned>(c - '0');
+  if (c >= 'a' && c <= 'f') return static_cast<unsigned>(c - 'a' + 10);
+  if (c >= 'A' && c <= 'F') return static_cast<unsigned>(c - 'A' + 10);
+  return 0;
+}
+
+static void append_bmp(unsigned cp, std::string& out) {
+  if (cp < 0x80) {
+    out += static_cast<char>(cp);
+    return;
+  }
+  if (cp < 0x800) {
+    out += static_cast<char>(0xC0 | (cp >> 6));
+    out += static_cast<char>(0x80 | (cp & 63));
+    return;
+  }
+  out += static_cast<char>(0xE0 | (cp >> 12));
+  out += static_cast<char>(0x80 | ((cp >> 6) & 63));
+  out += static_cast<char>(0x80 | (cp & 63));
+}
+
 struct Parser {
   const char* p;
   const char* end;
@@ -173,12 +200,16 @@ struct Parser {
   //   步骤2：按首字符分派——'{' 解析对象、'[' 解析数组、'"' 解析字符串、
   //          't'/'f' 匹配 true/false 字面量、'n' 匹配 null；
   //   步骤3：其余情况一律按数字解析。
-  Json parse_value() {
+  Json parse_value(size_t depth = 0) {
     ws();
     if (p >= end) { ok = false; return {}; }
     char c = *p;
-    if (c == '{') return parse_obj();
-    if (c == '[') return parse_arr();
+    if ((c == '{' || c == '[') && depth >= Json::kMaxNestingDepth) {
+      ok = false;
+      return {};
+    }
+    if (c == '{') return parse_obj(depth + 1);
+    if (c == '[') return parse_arr(depth + 1);
     if (c == '"') { Json j; j.kind = Json::Str; j.str = parse_str(); return j; }
     if (c == 't') { expect("true"); Json j; j.kind = Json::Bool; j.b = true; return j; }
     if (c == 'f') { expect("false"); Json j; j.kind = Json::Bool; j.b = false; return j; }
@@ -194,51 +225,40 @@ struct Parser {
     }
   }
 
-  // 伪代码（解析带引号字符串）：
-  //   步骤1：校验开引号，缺失则置失败并返回空串；
-  //   步骤2：循环读取字符直至闭引号——普通字符原样追加；
-  //   步骤3：遇 '\' 处理转义——n/t/r/"/'\'/'/' 映射为对应字符，\uXXXX 转义仅处理 BMP 码点
-  //          并按 UTF-8 编码追加（代理对与多字节字符按 UTF-8 输出），未知转义原样保留转义字符；
-  //   步骤4：读到闭引号则消费之；越界未闭合则置失败。
+  // Decode one BMP escape, preserving the existing permissive decoder.
+  void parse_unicode_escape(std::string& out) {
+    if (end - p < 4) { ok = false; return; }
+    unsigned cp = 0;
+    for (int i = 0; i < 4; ++i) cp = (cp << 4) | hex_digit(*p++);
+    append_bmp(cp, out);
+  }
+
+  void parse_escape(std::string& out) {
+    const char escaped = *p++;
+    switch (escaped) {
+      case 'n': out += '\n'; break;
+      case 't': out += '\t'; break;
+      case 'r': out += '\r'; break;
+      case 'u': parse_unicode_escape(out); break;
+      default: out += escaped; break;
+    }
+  }
+
   std::string parse_str() {
     std::string s;
     if (p >= end || *p != '"') { ok = false; return s; }
     ++p;
-    while (p < end && *p != '"') {
+    while (p < end) {
       char c = *p++;
+      if (c == '"') return s;
       if (c == '\\' && p < end) {
-        char e = *p++;
-        switch (e) {
-          case 'n': s += '\n'; break;
-          case 't': s += '\t'; break;
-          case 'r': s += '\r'; break;
-          case '"': s += '"'; break;
-          case '\\': s += '\\'; break;
-          case '/': s += '/'; break;
-          case 'u': {
-            // 仅处理 BMP；代理对与多字节字符按 UTF-8 编码输出
-            if (end - p < 4) { ok = false; return s; }
-            unsigned cp = 0;
-            for (int i = 0; i < 4; ++i) {
-              char h = *p++;
-              cp <<= 4;
-              if (h >= '0' && h <= '9') cp |= h - '0';
-              else if (h >= 'a' && h <= 'f') cp |= h - 'a' + 10;
-              else if (h >= 'A' && h <= 'F') cp |= h - 'A' + 10;
-            }
-            if (cp < 0x80) s += (char)cp;
-            else if (cp < 0x800) { s += (char)(0xC0 | (cp >> 6)); s += (char)(0x80 | (cp & 63)); }
-            else { s += (char)(0xE0 | (cp >> 12)); s += (char)(0x80 | ((cp >> 6) & 63)); s += (char)(0x80 | (cp & 63)); }
-            break;
-          }
-          default: s += e;
-        }
+        parse_escape(s);
+        if (!ok) return s;
       } else {
         s += c;
       }
     }
-    if (p < end) ++p;  // 闭引号
-    else ok = false;
+    ok = false;
     return s;
   }
 
@@ -266,12 +286,12 @@ struct Parser {
   //   步骤1：消费 '['，若紧跟 ']' 返回空数组；
   //   步骤2：循环——解析一个元素追加到 arr；
   //   步骤3：遇 ']' 结束返回；否则要求 ',' 分隔符，缺失则置失败返回。
-  Json parse_arr() {
+  Json parse_arr(size_t depth) {
     Json j = Json::array();
     ++p;  // '['
     if (eat(']')) return j;
     while (ok) {
-      j.arr.push_back(parse_value());
+      j.arr.push_back(parse_value(depth));
       if (eat(']')) return j;
       if (!eat(',')) { ok = false; return j; }
     }
@@ -282,7 +302,7 @@ struct Parser {
   //   步骤1：消费 '{'，若紧跟 '}' 返回空对象；
   //   步骤2：循环——要求 '"' 开始解析键字符串，再要求 ':'，解析值后按键序追加到 obj；
   //   步骤3：遇 '}' 结束返回；否则要求 ','，缺失则置失败返回。
-  Json parse_obj() {
+  Json parse_obj(size_t depth) {
     Json j = Json::object();
     ++p;  // '{'
     if (eat('}')) return j;
@@ -291,7 +311,7 @@ struct Parser {
       if (peek() != '"') { ok = false; return j; }
       std::string key = parse_str();
       if (!eat(':')) { ok = false; return j; }
-      j.obj.emplace_back(std::move(key), parse_value());
+      j.obj.emplace_back(std::move(key), parse_value(depth));
       if (eat('}')) return j;
       if (!eat(',')) { ok = false; return j; }
     }

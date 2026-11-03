@@ -182,37 +182,62 @@ RememberResult Engine::remember_turn_ex(Extraction ex, const std::string& speake
 //        若 current_only 为 true，则跳过已被 SUPERSEDES 取代（attrs 带 valid_to）的过时事件
 // 步骤2：按 order_by 排序——"time" 按时间戳倒序，"importance" 按重要度倒序
 // 步骤3：截断到 limit 条后返回
+namespace {
+
+bool matches_entities(const Storage& storage, const Node& event,
+                       const std::vector<std::string>& entity_uids) {
+  if (entity_uids.empty()) return true;
+  for (const auto& [edge, node] : storage.neighbors(event.uid, {RelType::INVOLVES})) {
+    if (std::find(entity_uids.begin(), entity_uids.end(), node->uid) != entity_uids.end())
+      return true;
+  }
+  return false;
+}
+
+bool matches_keywords(const Storage& storage, const Node& event,
+                       const std::vector<std::string>& keywords) {
+  if (keywords.empty()) return true;
+  for (const auto& [edge, node] : storage.neighbors(event.uid, {RelType::CONTAINS})) {
+    if (std::find(keywords.begin(), keywords.end(), node->name) != keywords.end()) return true;
+  }
+  return false;
+}
+
+bool matches_lookup(const Storage& storage, const Node& event, const LookupQuery& query,
+                    const std::vector<std::string>& keywords) {
+  if (query.time_from > 0 && event.ts < query.time_from) return false;
+  if (query.time_to > 0 && event.ts > query.time_to) return false;
+  if (query.current_only && event.attrs.count("valid_to")) return false;
+  if (!matches_entities(storage, event, query.entity_uids)) return false;
+  if (!query.place_uid.empty() &&
+      !storage.find_edge(event.uid, query.place_uid, RelType::HAPPENED_AT)) return false;
+  return matches_keywords(storage, event, keywords);
+}
+
+void order_lookup(std::vector<const Node*>& events, const std::string& order_by) {
+  if (order_by == "time") {
+    std::sort(events.begin(), events.end(),
+              [](const Node* a, const Node* b) { return a->ts > b->ts; });
+  } else if (order_by == "importance") {
+    std::sort(events.begin(), events.end(),
+              [](const Node* a, const Node* b) { return a->importance > b->importance; });
+  }
+}
+
+}  // namespace
+
 std::vector<const Node*> Engine::lookup(const LookupQuery& q) const {
   std::vector<const Node*> out;
-  for (auto* n : storage_.nodes_of_kind(NodeKind::Event)) {
-    bool ok = true;
-    if (q.time_from > 0 && n->ts < q.time_from) ok = false;
-    if (q.time_to > 0 && n->ts > q.time_to) ok = false;
-    if (q.current_only && n->attrs.count("valid_to")) ok = false;  // 过时事实默认不取
-    if (ok && !q.entity_uids.empty()) {
-      bool hit = false;
-      for (auto& [e, nb] : storage_.neighbors(n->uid, {RelType::INVOLVES}))
-        for (auto& u : q.entity_uids)
-          if (nb->uid == u) hit = true;
-      ok = hit;
-    }
-    if (ok && !q.place_uid.empty())
-      ok = storage_.find_edge(n->uid, q.place_uid, RelType::HAPPENED_AT) != nullptr;
-    if (ok && !q.keywords.empty()) {
-      bool hit = false;
-      for (auto& [e, nb] : storage_.neighbors(n->uid, {RelType::CONTAINS}))
-        for (auto& w : q.keywords)
-          if (nb->name == keyword_.normalize(w)) hit = true;
-      ok = hit;
-    }
-    if (ok) out.push_back(n);
+  // A non-positive limit cannot produce results; avoid signed-to-size_t resize overflow.
+  if (q.limit <= 0) return out;
+  std::vector<std::string> keywords;
+  keywords.reserve(q.keywords.size());
+  for (const auto& word : q.keywords) keywords.push_back(keyword_.normalize(word));
+  for (auto* event : storage_.nodes_of_kind(NodeKind::Event)) {
+    if (matches_lookup(storage_, *event, q, keywords)) out.push_back(event);
   }
-  if (q.order_by == "time")
-    std::sort(out.begin(), out.end(), [](auto* a, auto* b) { return a->ts > b->ts; });
-  else if (q.order_by == "importance")
-    std::sort(out.begin(), out.end(),
-              [](auto* a, auto* b) { return a->importance > b->importance; });
-  if ((int)out.size() > q.limit) out.resize(q.limit);
+  order_lookup(out, q.order_by);
+  if (out.size() > static_cast<size_t>(q.limit)) out.resize(q.limit);
   return out;
 }
 

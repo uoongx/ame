@@ -111,6 +111,10 @@ class EntityResolver {
   std::string redirect(const std::string& uid) const;
 
  private:
+  ResolveResult resolve_identified(const std::string& surface, const Attrs& identifiers);
+  std::vector<const Node*> name_candidates(const std::string& surface) const;
+  ResolveResult resolve_candidates(const std::string& surface, const ResolveContext& context,
+                                    const std::vector<const Node*>& candidates);
   std::string create_mention(const std::string& surface, const std::string& entity_uid,
                              double confidence);
   Storage& storage_;
