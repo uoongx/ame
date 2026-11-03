@@ -1,6 +1,6 @@
 # AME Java SDK 通用集成指南
 
-适用版本：`io.ame:ame-java:3.0.0-rc.2`（classifier：`linux-x86_64`），Linux x86_64、Java 17+，JNI ABI 1。本文面向已有 Java Agent，在 Agent 进程内读写长期记忆，不绑定行业、模型供应商或 Web 框架。
+适用版本：`com.huawei.convai:convai-ame-java:3.0.0-rc.2`（标准主 JAR，无 classifier），Linux x86_64、Java 17+，JNI ABI 1。本文面向已有 Java Agent，在 Agent 进程内读写长期记忆，不绑定行业、模型供应商或 Web 框架。
 
 完整方法、参数和 JSON 契约见 [接口参考](API.md)；可编译源码和运行命令见 [示例](../examples/README.md)。provider、回退策略和模型回调属于应用适配层，不是 JAR 自带接口。
 
@@ -8,17 +8,21 @@
 
 | 项目 | 约定 |
 |---|---|
-| Java 类 | `io.ame.AmeEngine`，实现 `AutoCloseable` |
-| Maven 依赖 | `io.ame:ame-java:3.0.0-rc.2`，classifier `linux-x86_64` |
+| Java 类 | `com.huawei.convai.ame.AmeEngine`，实现 `AutoCloseable` |
+| Maven 依赖 | `com.huawei.convai:convai-ame-java:3.0.0-rc.2`，不带 classifier |
 | 运行环境 | Linux x86_64、Java 17+、与 SO 兼容的 glibc |
 | Java 运行依赖 | SDK 没有第三方 Java 运行依赖；JSON 解析沿用应用自己的库 |
 | 运行方式 | 同进程 JNI 调用；没有 HTTP 地址、服务端口或模型 key |
 | 数据位置 | 应用传入的本地目录，主要快照为 `graph.json` |
-| 当前 JAR | `ame-java-3.0.0-rc.2-linux-x86_64.jar`，含 `io/ame/native/linux-x86_64/libame_jni.so` |
+| 当前 JAR | `convai-ame-java-3.0.0-rc.2.jar`，含 `com/huawei/convai/ame/native/linux-x86_64/libame_jni.so` |
 
 AME 提供记忆写入和检索证据，应用继续负责用户鉴权、当前上下文、业务规则、模型调用及回答输出。当前 Java API 使用内置规则提取和默认向量实现，没有 embedding/提取器注入、模型调用或远程存储配置入口。
 
-从仓库根目录执行 `sh .cloudbuild/build.sh`，得到 `build/cloudbuild/artifacts/ame-java-linux-x86_64.tar.gz` 及校验文件。解包后使用其中的 JAR 和配套 POM。完整构建、解包与校验命令见 [SDK README](../README.md)。构建不强制 glibc 2.36，默认记录实际所需符号版本；可显式配置 `AME_MAX_GLIBC` 执行上限检查。面向更老的 Linux 时须使用匹配目标的构建环境重新产包。实际 SO 要求、构建和测试证据见归档 `metadata/build.json` 的 `required_glibc` 及 [Linux 验证记录](LINUX-VALIDATION.md)。部署前仍需在目标镜像、临时目录权限和数据卷上验收。
+从仓库根目录执行 `sh .cloudbuild/build.sh`，在 `build/cloudbuild/artifacts/` 得到 `convai-ame-java-3.0.0-rc.2.jar`、配套 `.pom`、`convai-ame-java-linux-x86_64.tar.gz` 诊断归档和 `SHA256SUMS`。独立 JAR/POM 可直接交给平台制品发布步骤，无需先解包；构建脚本只生成本地产物，不自动 `install` 或 `deploy`。完整构建、解包与校验命令见 [SDK README](../README.md)。
+
+Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源路径同步迁移；调用方须把 import 改为 `com.huawei.convai.ame.AmeEngine`，并更新反射类名或示例启动类后重新编译。Maven GAV 和无 classifier 的构件形式不变，Linux 平台限制、JNI ABI 1 与 `ame.native.path` 属性也不变。若使用外置 SO，应替换为同次构建的 SO；新 JAR 不应混用旧 Java 包对应的 JNI 库。
+
+构建不强制 glibc 2.36，默认记录实际所需符号版本；可显式配置 `AME_MAX_GLIBC` 执行上限检查。面向更老的 Linux 时须使用匹配目标的构建环境重新产包。实际 SO 要求以本次归档 `metadata/build.json` 的 `required_glibc` 及测试日志为准；[Linux 验证记录](LINUX-VALIDATION.md) 保留其历史坐标和 Java 包对应的构建、测试证据。部署前仍需在目标镜像、临时目录权限和数据卷上验收。
 
 ## 2. 引入依赖
 
@@ -26,10 +30,9 @@ AME 提供记忆写入和检索证据，应用继续负责用户鉴权、当前�
 
 ```xml
 <dependency>
-  <groupId>io.ame</groupId>
-  <artifactId>ame-java</artifactId>
+  <groupId>com.huawei.convai</groupId>
+  <artifactId>convai-ame-java</artifactId>
   <version>3.0.0-rc.2</version>
-  <classifier>linux-x86_64</classifier>
 </dependency>
 ```
 
@@ -37,20 +40,19 @@ Gradle 对应声明：
 
 ```groovy
 dependencies {
-    implementation 'io.ame:ame-java:3.0.0-rc.2:linux-x86_64'
+    implementation 'com.huawei.convai:convai-ame-java:3.0.0-rc.2'
 }
 ```
 
-该坐标不表示已经发布到 Maven Central。仓库地址和凭据沿用团队配置；收到归档后，也可在解包目录先安装到本地仓库：
+该坐标不表示已经发布到 Maven Central 或公司仓库；发布由公司平台已有步骤管理，本仓库不新增发布行为。仅在当前机器试用时，可从源码仓库根目录手动安装构建输出：
 
 ```sh
 mvn install:install-file \
-  -Dfile=ame-java-3.0.0-rc.2-linux-x86_64.jar \
-  -DpomFile=ame-java-3.0.0-rc.2.pom \
-  -Dclassifier=linux-x86_64
+  -Dfile=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar \
+  -DpomFile=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.pom
 ```
 
-本地安装只影响当前机器，CI/其他 Agent 仍需拿到同一构件。团队发布也必须保留 classifier，并记录 JAR SHA256 与验证结果；不能覆盖旧的无 classifier 坐标。
+本地安装只影响当前机器，CI/其他 Agent 仍需拿到同一构件。平台发布应使用配套 POM 中的新坐标，不添加 classifier，并记录 JAR SHA256 与验证结果；历史 `io.ame:ame-java` 构件保持原样。本次迁包保留上述 GAV，需核对实际 JAR 的校验值和类路径，避免沿用包含旧 Java 包的缓存。
 
 首次 `open` 先校验当前 JVM 为 Linux x86_64，再从 JAR 提取 SO 到 `java.io.tmpdir`。需要外置库时，在首次 `open` 前指定 JVM 属性：
 
@@ -145,6 +147,6 @@ SDK 当前没有可配置后台 flush、WAL、事务、逐条删除、导出迁�
 
 ## 8. 最小接入验收
 
-先运行真实 JAR 的 `io.ame.examples.SdkQuickStart`，确认中文/emoji 写入、召回和关闭重开均通过；再运行 `io.ame.examples.PluggableAgentExample` 的 legacy、ame 及初始化失败回退场景。示例模型是明确标注的本地回调，不调用真实 LLM，也不声称验证回答质量。
+先运行真实 JAR 的 `com.huawei.convai.ame.examples.SdkQuickStart`，确认中文/emoji 写入、召回和关闭重开均通过；再运行 `com.huawei.convai.ame.examples.PluggableAgentExample` 的 legacy、ame 及初始化失败回退场景。示例模型是明确标注的本地回调，不调用真实 LLM，也不声称验证回答质量。
 
 接入目标工程后至少核对：实际 payload 中有预期历史、原上下文保持、每请求模型只调用一次、异常/取消不会触发成功写入、不同可信作用域不互读，以及应用关闭后能重开快照。SDK 的 Linux 验证不替代目标应用、部署镜像、存储与真实模型的集成验收；可运行示例的验证环境与范围见 [示例记录](../examples/README.md)。

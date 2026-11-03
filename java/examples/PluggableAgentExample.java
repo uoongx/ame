@@ -1,6 +1,6 @@
-package io.ame.examples;
+package com.huawei.convai.ame.examples;
 
-import io.ame.AmeEngine;
+import com.huawei.convai.ame.AmeEngine;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -45,7 +45,7 @@ public final class PluggableAgentExample {
     }
   }
 
-  // These three types belong to the application, not to io.ame or the delivered SDK JAR.
+  // These three types belong to the application, not to com.huawei.convai.ame or the delivered SDK JAR.
   interface ContextProvider extends AutoCloseable {
     List<Message> prepare(Request request);
     default void onCompleted(Request request, String completeAnswer) {}

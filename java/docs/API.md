@@ -1,8 +1,8 @@
 # AME Java SDK 接口参考
 
-适用版本：`io.ame:ame-java:3.0.0-rc.2`（classifier：`linux-x86_64`），Linux x86_64、Java 17+，AME JNI ABI **1**。本文根据当前 `AmeEngine.java`、JNI 实现及底层引擎核实，面向直接依赖 JAR 的应用。
+适用版本：`com.huawei.convai:convai-ame-java:3.0.0-rc.2`（标准主 JAR，无 classifier），Linux x86_64、Java 17+，AME JNI ABI **1**。本文根据当前 `AmeEngine.java`、JNI 实现及底层引擎核实，面向直接依赖 JAR 的应用。Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源路径同步迁移；调用方须更新 import 并重新编译，Maven GAV、Linux 平台限制与 `ame.native.path` 属性保持不变。
 
-入口是 `io.ame.AmeEngine`，它实现 `AutoCloseable`。调用在当前 JVM 进程内同步执行；SDK 没有 HTTP endpoint、服务端口、模型 key 或远程存储配置。返回的记忆证据由应用解析并交给自己的模型，SDK 不生成回答。
+入口是 `com.huawei.convai.ame.AmeEngine`，它实现 `AutoCloseable`。调用在当前 JVM 进程内同步执行；SDK 没有 HTTP endpoint、服务端口、模型 key 或远程存储配置。返回的记忆证据由应用解析并交给自己的模型，SDK 不生成回答。
 
 通用接入方式见 [集成指南](INTEGRATION.md)，可编译示例见 [examples](../examples/README.md)，构建和分发见 [SDK README](../README.md)。
 
@@ -49,12 +49,12 @@ public synchronized void close();
 同一目录不能被另一个引擎实例或进程同时打开，包括只想读取的实例。当前 API 没有只读模式；重复打开或目录不可写通常表现为 `UncheckedIOException`。
 
 ```java
-import io.ame.AmeEngine;
+import com.huawei.convai.ame.AmeEngine;
 import java.nio.file.Path;
 import java.util.logging.Logger;
 
 try (AmeEngine memory = AmeEngine.open(Path.of("data", "memory", "user-123"))) {
-    Logger.getLogger("io.ame.integration").info(memory.stats());
+    Logger.getLogger("com.huawei.convai.ame.integration").info(memory.stats());
 }
 ```
 
@@ -246,14 +246,14 @@ Java 字节码目标版本是 **17**；AME 的私有 `nativeVersion()` 返回的
 
 1. 校验 JVM 为 Linux x86_64；`os.arch` 接受 `amd64/x86_64/x64`。不支持的平台抛 `UnsatisfiedLinkError`，即使设置外置路径也不会跳过此检查。
 2. 若设置 JVM 系统属性 `ame.native.path`，只尝试这个 SO 文件；相对路径会转为绝对路径。空值、目录、错误文件不会静默回退到 JAR 资源。
-3. 否则从 `/io/ame/native/linux-x86_64/libame_jni.so` 提取到 `java.io.tmpdir` 下的独立目录，再 `System.load`。运行环境需要允许临时文件写入与 native 加载。
+3. 否则从 `/com/huawei/convai/ame/native/linux-x86_64/libame_jni.so` 提取到 `java.io.tmpdir` 下的独立目录，再 `System.load`。运行环境需要允许临时文件写入与 native 加载。
 
 ```sh
 java -Dame.native.path=/absolute/path/libame_jni.so -jar your-agent.jar
 ```
 
-该属性须在首次 `open()` 前设置；同一类加载器生命周期只加载一次库，之后改属性不会切换已加载的库。SDK 不从自定义环境变量或 HTTP 配置读取此值，也不自动下载缺失的库。
+该属性须在首次 `open()` 前设置；同一类加载器生命周期只加载一次库，之后改属性不会切换已加载的库。JNI 导出符号随 Java 类名迁移，因此外置 SO 也须替换为同次构建产物；ABI 编号仍为 1 不表示可以复用 `io.ame` 旧库。SDK 不从自定义环境变量或 HTTP 配置读取此值，也不自动下载缺失的库。
 
-当前交付文件为 `ame-java-3.0.0-rc.2-linux-x86_64.jar`，必须使用 classifier `linux-x86_64` 引用。构建入口是 `sh .cloudbuild/build.sh`，产物、配套 POM 和解包步骤见 [SDK README](../README.md)。Linux 运行时还必须满足实际 SO 的 glibc 要求；构建默认不设置版本上限，仅在显式配置 `AME_MAX_GLIBC` 时检查。实际要求、构建证据及测试结果见 [Linux 验证记录](LINUX-VALIDATION.md) 与归档 `metadata/build.json` 的 `required_glibc`。版本号和 Java 字节码目标都不能替代目标系统验证。
+当前交付文件为 `build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar` 及同目录配套 `.pom`，使用上述标准 Maven 坐标引用，不带 classifier。构建入口仍是 `sh .cloudbuild/build.sh`，只打包本地产物，不自动 `install` 或 `deploy`；诊断归档和校验步骤见 [SDK README](../README.md)。Linux 运行时还必须满足实际 SO 的 glibc 要求；构建默认不设置版本上限，仅在显式配置 `AME_MAX_GLIBC` 时检查。实际要求以本次归档 `metadata/build.json` 的 `required_glibc` 及测试日志为准，[Linux 验证记录](LINUX-VALIDATION.md) 保留其记录的历史坐标、Java 包与产物证据。版本号和 Java 字节码目标都不能替代目标系统验证。
 
 本文以现有六方法 API 为边界。C++ 内部的注册实体、精确查询、时间过滤、修改权重等能力没有因此自动成为 Java 公共接口；应用适配层的 provider、用户缓存和失败回退也不是 SDK 内置配置项。

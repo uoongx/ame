@@ -16,9 +16,9 @@
 [docs/engineering/联想记忆引擎_工程实现与优化文档.md](docs/engineering/联想记忆引擎_工程实现与优化文档.md)（实现与迭代记录）。
 文档索引见 [docs/README.md](docs/README.md)。
 
-Linux x86_64 Java Agent 可通过 Maven 构件 `io.ame:ame-java:3.0.0-rc.2`（classifier：`linux-x86_64`，集成候选版）集成。JAR 封装 Java 17+ API、JNI 与 Linux 原生库，在 Agent 进程内运行；接口、构建和验证说明见 [AME Java SDK](java/README.md)。
+Linux x86_64 Java Agent 可通过 Maven 构件 `com.huawei.convai:convai-ame-java:3.0.0-rc.2`（标准主 JAR，无 classifier，集成候选版）集成。JAR 封装 Java 17+ API、JNI 与 Linux 原生库，在 Agent 进程内运行；Java 包已迁移至 `com.huawei.convai.ame`，调用方须更新 import 并重新编译，运行平台仍限定 Linux x86_64。接口、构建和验证说明见 [AME Java SDK](java/README.md)。
 
-公司 Linux 流水线构建入口：`sh .cloudbuild/build.sh`。输出带 `linux-x86_64` classifier 的 SDK、真实 JNI 验证日志和校验值，配置方式见 [.cloudbuild/README.md](.cloudbuild/README.md)。
+公司 Linux 流水线构建入口：`sh .cloudbuild/build.sh`。在 `build/cloudbuild/artifacts/` 输出 `convai-ame-java-3.0.0-rc.2.jar`、配套 `.pom`、Linux 诊断归档和校验值。JAR/POM 可直接交给平台制品发布步骤；本仓库只负责构建打包，不自动执行 Maven `install` 或远端 `deploy`。配置方式见 [.cloudbuild/README.md](.cloudbuild/README.md)。
 
 通用对接资料：[接口参考](java/docs/API.md) · [集成指南](java/docs/INTEGRATION.md) · [可运行示例](java/examples/README.md)。
 

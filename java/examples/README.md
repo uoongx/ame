@@ -1,36 +1,32 @@
 # 不依赖框架的 Java 示例
 
-这两个示例面向 Linux x86_64，只依赖 Java 17+ 和 `ame-java-3.0.0-rc.2-linux-x86_64.jar`，无需 Spring、JSON 库或模型服务。示例全部使用合成中文数据，请使用专用演示目录。
+这两个示例面向 Linux x86_64，只依赖 Java 17+ 和 `convai-ame-java-3.0.0-rc.2.jar`（`com.huawei.convai:convai-ame-java:3.0.0-rc.2`，无 classifier），无需 Spring、JSON 库或模型服务。SDK Java 包已迁移至 `com.huawei.convai.ame`，JNI 资源为 `com/huawei/convai/ame/native/linux-x86_64/libame_jni.so`；调用方须更新 import 并重新编译，Linux 平台限制不变。示例全部使用合成中文数据，请使用专用演示目录。
 
 - `SdkQuickStart.java`：写入两条消息，召回、查看统计、保存，然后关闭并重新打开同一目录。
 - `PluggableAgentExample.java`：用应用自己的 `ContextProvider` 选择 legacy 或 AME。默认 legacy；模型回调记录输入消息的角色和长度并返回固定文本，没有调用真实 LLM，也不会解释召回 JSON。
 
 ## 编译与运行
 
-以下命令从 AME 仓库根目录执行。已有交付归档时可跳过构建，直接校验、解包；也可将 `JAR` 换成解包后的实际路径。编译需要 JDK 17+，`--release 17` 保持 Java 17 字节码兼容。两个示例属于 `io.ame.examples` 包；源文件保留在当前目录，`javac -d` 会生成对应的包目录，运行时使用完整类名。
+以下命令从 AME 仓库根目录执行，直接使用构建输出的独立 JAR。构建仅打包，不自动安装或远端发布；收到现成产物时可跳过构建。若只收到诊断归档，可按 [SDK README](../README.md) 解包并将 `JAR` 换成解包后的实际路径。编译需要 JDK 17+，`--release 17` 保持 Java 17 字节码兼容。两个示例已迁入 `com.huawei.convai.ame.examples` 包；源文件保留在当前目录，`javac -d` 会生成对应的包目录，运行时使用下面的新完整类名。
 
 ```sh
 sh .cloudbuild/build.sh
 (cd build/cloudbuild/artifacts && sha256sum -c SHA256SUMS)
-mkdir -p build/cloudbuild/sdk
-tar -xzf build/cloudbuild/artifacts/ame-java-linux-x86_64.tar.gz -C build/cloudbuild/sdk
-(cd build/cloudbuild/sdk && sha256sum -c SHA256SUMS)
-
-JAR=build/cloudbuild/sdk/ame-java-3.0.0-rc.2-linux-x86_64.jar
+JAR=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar
 OUT=java/target/example-classes
 mkdir -p "$OUT"
 javac -encoding UTF-8 --release 17 -cp "$JAR" -d "$OUT" \
   java/examples/SdkQuickStart.java java/examples/PluggableAgentExample.java
 
 # 默认 legacy：不打开 AME，也不加载 native library。
-java -cp "$OUT:$JAR" io.ame.examples.PluggableAgentExample
+java -cp "$OUT:$JAR" com.huawei.convai.ame.examples.PluggableAgentExample
 
 # SDK 闭环：创建并保留临时演示目录；也可在类名后传入专用目录。
-java -cp "$OUT:$JAR" io.ame.examples.SdkQuickStart
+java -cp "$OUT:$JAR" com.huawei.convai.ame.examples.SdkQuickStart
 
 # AME：同一个可信身份的实例在两次请求之间复用。
 java -Dexample.context=ame -Dexample.dataRoot=java/target/example-memory \
-  -cp "$OUT:$JAR" io.ame.examples.PluggableAgentExample
+  -cp "$OUT:$JAR" com.huawei.convai.ame.examples.PluggableAgentExample
 ```
 
 QuickStart 和 AME 模式需要 Linux x86_64 JVM 与兼容的 glibc。JAR 内置对应 SO，通常无需配置 native 路径；如需外置库，可在 `java` 后、主类名前加 `-Dame.native.path=/absolute/path/libame_jni.so`。加载器在处理外置路径前仍校验平台。构建与运行条件见 [SDK README](../README.md)。
@@ -64,6 +60,6 @@ native 无法加载时 QuickStart 明确失败；可插拔示例记录 WARNING �
 
 ## 验证记录
 
-当前版本为 `3.0.0-rc.2`，验证结论以 [Linux 验证记录](../docs/LINUX-VALIDATION.md) 为准。流水线中 SDK smoke/boundary 通过不等于这两个集成示例已经运行；只有记录中明确列出的实际执行项才算完成验证。
+当前版本为 `3.0.0-rc.2`，[Linux 验证记录](../docs/LINUX-VALIDATION.md) 保留当时坐标、Java 包和文件名对应的验证结论，不自动覆盖本次迁包后的产物。流水线中 SDK smoke/boundary 通过不等于这两个集成示例已经运行；只有本次构建日志或验证记录中明确列出的实际执行项才算完成验证。
 
 [RC1 历史验证](../docs/HISTORICAL-RC1-VALIDATION.md) 仅对应当时的产物，不能替代 RC2 验收。这里的模型始终是本地固定回调，示例运行不证明真实模型回答质量、流式取消行为或生产性能。

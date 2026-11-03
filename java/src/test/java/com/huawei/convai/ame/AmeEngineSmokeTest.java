@@ -1,4 +1,4 @@
-package io.ame;
+package com.huawei.convai.ame;
 
 import java.io.UncheckedIOException;
 import java.nio.file.Files;

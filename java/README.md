@@ -1,6 +1,6 @@
 # AME Java SDK
 
-`io.ame:ame-java:3.0.0-rc.2`（classifier：`linux-x86_64`）是面向 **Linux x86_64、Java 17+** 的嵌入式记忆 SDK。它通过 JNI 调用 AME C++ 引擎，没有第三方 Java 运行依赖，不绑定 Spring、Agent 框架或模型服务。SDK 是应用依赖库，不是可通过 `java -jar` 启动的服务。
+`com.huawei.convai:convai-ame-java:3.0.0-rc.2`（标准主 JAR，无 classifier）是面向 **Linux x86_64、Java 17+** 的嵌入式记忆 SDK。它通过 JNI 调用 AME C++ 引擎，没有第三方 Java 运行依赖，不绑定 Spring、Agent 框架或模型服务。SDK 是应用依赖库，不是可通过 `java -jar` 启动的服务。Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源也迁入对应路径；调用方须更新 import、反射类名或启动类名并重新编译。
 
 接入其他 Agent 时，使用 [接口参考](docs/API.md)、[通用集成指南](docs/INTEGRATION.md) 和 [可运行示例](examples/README.md)。provider、回退、身份鉴权与调度由应用实现，SDK 提供同步的记忆读写接口。
 
@@ -15,18 +15,22 @@ sh .cloudbuild/build.sh
 需要 JDK 17+、Maven 3.8+、CMake 3.24+、g++ / make、Python 3.8+ 和 binutils。公司 Maven settings、缓存、并行度及 glibc 上限配置见 [.cloudbuild 接入说明](../.cloudbuild/README.md)。该入口每次在隔离目录重新编译 JNI，打包本次 SO，显式执行真实 JNI 测试；全部成功后输出：
 
 ```text
-build/cloudbuild/artifacts/ame-java-linux-x86_64.tar.gz
+build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar
+build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.pom
+build/cloudbuild/artifacts/convai-ame-java-linux-x86_64.tar.gz
 build/cloudbuild/artifacts/SHA256SUMS
 ```
 
-归档中的主要文件是 `ame-java-3.0.0-rc.2-linux-x86_64.jar`、配套 `ame-java-3.0.0-rc.2.pom`、`libame_jni.so`、构建与测试元数据、`SHA256SUMS`。版本取自 POM，固定归档名便于流水线收集。构建不会自动安装或发布到 Maven 仓库。
+独立 JAR/POM 可直接作为公司平台制品发布步骤的输入，无需先解包；外部 `SHA256SUMS` 覆盖 JAR、POM 和诊断归档。归档保留同名 JAR/POM、`libame_jni.so`、构建与测试元数据及内部 `SHA256SUMS`。坐标与版本取自 POM，固定归档名便于流水线收集。构建仅打包，不自动执行 Maven `install` 或 `deploy`，也不新增远端发布配置。
+
+归档内 `metadata/build.json` 记录 `group_id: "com.huawei.convai"`、`artifact_id: "convai-ame-java"`、`version: "3.0.0-rc.2"`、`java_package: "com.huawei.convai.ame"`、`classifier: null` 和 `platform: "linux-x86_64"`。`java_package` 区分同 GAV 下迁包前后的产物；无 classifier 不表示支持其他操作系统或 CPU 架构。
 
 在源码仓库中解包和校验：
 
 ```sh
 (cd build/cloudbuild/artifacts && sha256sum -c SHA256SUMS)
 mkdir -p build/cloudbuild/sdk
-tar -xzf build/cloudbuild/artifacts/ame-java-linux-x86_64.tar.gz -C build/cloudbuild/sdk
+tar -xzf build/cloudbuild/artifacts/convai-ame-java-linux-x86_64.tar.gz -C build/cloudbuild/sdk
 (cd build/cloudbuild/sdk && sha256sum -c SHA256SUMS)
 ```
 
@@ -37,11 +41,11 @@ docker buildx build --platform linux/amd64 -f java/Dockerfile \
   --output type=local,dest=build/docker-artifacts .
 ```
 
-脚本和 Dockerfile 的实际验证范围见 [Linux 验证记录](docs/LINUX-VALIDATION.md)。旧版本验证单独保存在 [RC1 历史记录](docs/HISTORICAL-RC1-VALIDATION.md)，不能用于证明 RC2 已通过验证。原交付产物保持原样。
+[Linux 验证记录](docs/LINUX-VALIDATION.md) 保留当时坐标、Java 包和文件名对应的验证证据，不能单凭版本号相同视为迁包后的产物已验证；本次构建以自身元数据和测试日志为准。RC1 验证单独保存在 [历史记录](docs/HISTORICAL-RC1-VALIDATION.md)，原交付产物保持原样。
 
 ## 运行条件
 
-当前 SDK 只接受 Linux x86_64 JVM；加载器识别 `amd64/x86_64/x64`。JAR 内唯一 native 资源为 `io/ame/native/linux-x86_64/libame_jni.so`，JNI ABI 版本为 **1**。初次加载先校验平台，再读取外置路径或提取 JAR 资源；显式 `ame.native.path` 也不能绕过平台检查。
+当前 SDK 只接受 Linux x86_64 JVM；加载器识别 `amd64/x86_64/x64`。JAR 内唯一 native 资源为 `com/huawei/convai/ame/native/linux-x86_64/libame_jni.so`，JNI ABI 版本仍为 **1**。初次加载先校验平台，再读取外置路径或提取 JAR 资源；显式 `ame.native.path` 也不能绕过平台检查。
 
 Linux 运行时需满足本次 SO 的实际 glibc 依赖，SDK 不写死 `2.36`。流水线默认仅检测和记录所需版本；只有显式设置 `AME_MAX_GLIBC` 时才执行符号版本上限检查。实际要求见归档 `metadata/build.json` 的 `required_glibc` 和 ELF 记录。面向旧版 Linux 时，应在匹配最低目标环境的工具链/sysroot 中重新构建，并在目标系统验证；修改上限不会降低二进制依赖，静态链接 C++ 运行库也不会消除 glibc 依赖。默认 Docker 示例使用 Debian 12，旧构建的验证数据见 [Linux 验证记录](docs/LINUX-VALIDATION.md)；Alpine/musl 不在此运行范围。
 
@@ -51,34 +55,32 @@ Linux 运行时需满足本次 SO 的实际 glibc 依赖，SDK 不写死 `2.36`�
 java -Dame.native.path=/absolute/path/libame_jni.so -jar your-agent.jar
 ```
 
-该属性必须指向文件；相对路径会转为绝对路径。错误路径不会静默回退到 JAR 内库。同一类加载器生命周期只加载一次库，之后修改属性不能切换已加载的库。不要混用其他 JNI 桥或 ABI 不匹配的库。
+该属性必须指向文件；相对路径会转为绝对路径。错误路径不会静默回退到 JAR 内库。同一类加载器生命周期只加载一次库，之后修改属性不能切换已加载的库。迁包后若仍配置外置 SO，须换用同次构建的 SO；不要混用旧包对应的 JNI 桥或 ABI 不匹配的库。
 
 ## 引入依赖
 
-收到归档后，先按上述步骤解包，再安装配套 JAR/POM：
+团队制品仓库已有该构件时直接声明依赖即可。仅需在当前机器试用时，可手动将构建输出安装到本地 Maven 仓库；此步骤不是构建入口的默认行为：
 
 ```sh
 mvn install:install-file \
-  -Dfile=build/cloudbuild/sdk/ame-java-3.0.0-rc.2-linux-x86_64.jar \
-  -DpomFile=build/cloudbuild/sdk/ame-java-3.0.0-rc.2.pom \
-  -Dclassifier=linux-x86_64
+  -Dfile=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar \
+  -DpomFile=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.pom
 ```
 
 应用声明：
 
 ```xml
 <dependency>
-  <groupId>io.ame</groupId>
-  <artifactId>ame-java</artifactId>
+  <groupId>com.huawei.convai</groupId>
+  <artifactId>convai-ame-java</artifactId>
   <version>3.0.0-rc.2</version>
-  <classifier>linux-x86_64</classifier>
 </dependency>
 ```
 
-本地安装不等于团队发布。团队 Maven 发布也必须保留 classifier；不要将此产物改名后覆盖旧的无 classifier 坐标。
+Gradle 使用 `implementation 'com.huawei.convai:convai-ame-java:3.0.0-rc.2'`，同样不带 classifier。本地安装只影响当前机器；公司平台的制品发布由平台已有步骤管理，本仓库不执行远端发布。历史 `io.ame:ame-java` 构件保持原样。本次迁包保留上述 GAV，消费时应核对 JAR 校验值，避免误用仍含旧 Java 包的本地缓存；源码引用改为以下新包：
 
 ```java
-import io.ame.AmeEngine;
+import com.huawei.convai.ame.AmeEngine;
 import java.nio.file.Path;
 import java.time.Instant;
 
@@ -105,17 +107,17 @@ SDK 不接受模型 key。当前写入使用内置规则提取器和默认向量
 
 ## JNI 验证入口
 
-`.cloudbuild` 会显式运行 `AmeEngineSmokeTest` 和 `AmeEngineBoundaryTest`；它们是普通 Java main，`mvn package` 本身不会运行这些检查。以下命令可对解包后的最终 JAR 重新验证，不设置外置 native 路径：
+`.cloudbuild` 会显式运行 `AmeEngineSmokeTest` 和 `AmeEngineBoundaryTest`；它们是普通 Java main，`mvn package` 本身不会运行这些检查。以下命令可对构建输出的最终 JAR 重新验证，不设置外置 native 路径：
 
 ```sh
-JAR=build/cloudbuild/sdk/ame-java-3.0.0-rc.2-linux-x86_64.jar
+JAR=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar
 CLASSES=java/target/test-classes
 mkdir -p "$CLASSES"
 javac --release 17 -encoding UTF-8 -cp "$JAR" -d "$CLASSES" \
-  java/src/test/java/io/ame/AmeEngineSmokeTest.java \
-  java/src/test/java/io/ame/AmeEngineBoundaryTest.java
-java -cp "$CLASSES:$JAR" io.ame.AmeEngineSmokeTest
-java -Xcheck:jni -cp "$CLASSES:$JAR" io.ame.AmeEngineBoundaryTest java/target/boundary-tests
+  java/src/test/java/com/huawei/convai/ame/AmeEngineSmokeTest.java \
+  java/src/test/java/com/huawei/convai/ame/AmeEngineBoundaryTest.java
+java -cp "$CLASSES:$JAR" com.huawei.convai.ame.AmeEngineSmokeTest
+java -Xcheck:jni -cp "$CLASSES:$JAR" com.huawei.convai.ame.AmeEngineBoundaryTest java/target/boundary-tests
 ```
 
 Smoke 检查中文/emoji 写入召回、Unicode 目录、保存重开、锁、重复关闭和损坏快照保护。Boundary 进一步检查 NUL、无效 UTF-16、JSON Unicode 转义、子 JVM 目录锁及 native 关闭竞争。两者只使用本地合成数据，不调用网络或模型，也不证明真实模型质量、目标存储或生产部署已经通过验收。

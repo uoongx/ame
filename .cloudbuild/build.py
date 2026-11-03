@@ -22,10 +22,17 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT = ROOT / "build" / "cloudbuild"
-CLASSIFIER = "linux-x86_64"
-BUNDLE = "ame-java-linux-x86_64.tar.gz"
-NATIVE_ENTRY = "io/ame/native/linux-x86_64/libame_jni.so"
-POM_ENTRY = "META-INF/maven/io.ame/ame-java/pom.xml"
+PLATFORM = "linux-x86_64"
+GROUP_ID = "com.huawei.convai"
+ARTIFACT_ID = "convai-ame-java"
+BUNDLE = ARTIFACT_ID + "-" + PLATFORM + ".tar.gz"
+LEGACY_BUNDLE = "ame-java-linux-x86_64.tar.gz"
+JAVA_PACKAGE = "com.huawei.convai.ame"
+JAVA_ENTRY = JAVA_PACKAGE.replace(".", "/") + "/"
+NATIVE_ENTRY = JAVA_ENTRY + "native/linux-x86_64/libame_jni.so"
+MAVEN_ENTRY = "META-INF/maven/" + GROUP_ID + "/" + ARTIFACT_ID + "/"
+POM_ENTRY = MAVEN_ENTRY + "pom.xml"
+PROPERTIES_ENTRY = MAVEN_ENTRY + "pom.properties"
 SDK_TESTS = ("NativeLibraryLoaderTest", "AmeEngineSmokeTest", "AmeEngineBoundaryTest")
 NATIVE_METADATA = ("toolchain.txt", "elf-header.txt", "elf-dynamic.txt", "elf-versions.txt", "elf-exports.txt")
 TOOL_LOGS = ("maven-version", "java-version", "javac-version")
@@ -45,9 +52,11 @@ def write_json(path, value):
 
 
 def clear_artifacts(directory):
-    # Only these two pipeline-owned files are replaced, never a recursive workspace cleanup.
-    for name in (BUNDLE, "SHA256SUMS"):
-        path = directory / name
+    # Remove only pipeline-owned outputs, including the previous bundle name.
+    paths = {directory / name for name in (BUNDLE, LEGACY_BUNDLE, "SHA256SUMS")}
+    for suffix in (".jar", ".pom"):
+        paths.update(directory.glob(ARTIFACT_ID + "-*" + suffix))
+    for path in sorted(paths):
         require(not path.is_dir(), "Artifact path is a directory: " + str(path))
         if path.exists() or path.is_symlink():
             path.unlink()
@@ -101,7 +110,7 @@ class Build:
         self.logs.mkdir()
         self.env = os.environ.copy()
         self.env.update(LANG="C.UTF-8", LC_ALL="C.UTF-8")
-        self.status = {"status": "FAILED", "platform": CLASSIFIER, "step": "preflight"}
+        self.status = {"status": "FAILED", "platform": PLATFORM, "step": "preflight"}
 
     def execute(self, step, command, env=None):
         self.status["step"] = step
@@ -177,9 +186,10 @@ class Build:
         ns = {"m": "http://maven.apache.org/POM/4.0.0"}
         version = project.findtext("m:version", namespaces=ns)
         require(version and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", version), "Invalid SDK version in java/pom.xml")
-        require(project.findtext("m:groupId", namespaces=ns) == "io.ame"
-                and project.findtext("m:artifactId", namespaces=ns) == "ame-java", "Unexpected Maven coordinates")
-        self.status.update(version=version, classifier=CLASSIFIER, java_release=17,
+        require(project.findtext("m:groupId", namespaces=ns) == GROUP_ID
+                and project.findtext("m:artifactId", namespaces=ns) == ARTIFACT_ID, "Unexpected Maven coordinates")
+        self.status.update(group_id=GROUP_ID, artifact_id=ARTIFACT_ID,
+                           version=version, classifier=None, java_release=17, java_package=JAVA_PACKAGE,
                            run_id=self.run.name)
         self.record_git_revision()
         return version
@@ -232,17 +242,32 @@ class Build:
 
     def package_java(self, sdk, native, version):
         self.execute("maven-package", self.maven_command(sdk, native))
-        filename = "ame-java-" + version + "-" + CLASSIFIER + ".jar"
+        filename = ARTIFACT_ID + "-" + version + ".jar"
         return sdk / "target" / filename
 
     def verify_jar(self, jar, library, source_pom):
         with zipfile.ZipFile(str(jar)) as archive:
             names = archive.namelist()
             require(len(names) == len(set(names)) and archive.testzip() is None, "Invalid JAR archive")
+            self.verify_java_namespace(names)
             libraries = [name for name in names if name.endswith((".so", ".dll", ".dylib"))]
             require(libraries == [NATIVE_ENTRY], "Unexpected native libraries in the JAR: " + str(libraries))
             require(archive.read(NATIVE_ENTRY) == library.read_bytes(), "Packaged JNI differs from the fresh build")
-            require(archive.read(POM_ENTRY) == source_pom.read_bytes(), "Embedded POM differs from source POM")
+            self.verify_maven_metadata(archive, source_pom)
+
+    def verify_java_namespace(self, names):
+        require(not any(name.startswith("io/ame/") for name in names), "Legacy Java package remains in the JAR")
+        for name in ("AmeEngine.class", "NativeLibraryLoader.class"):
+            require(JAVA_ENTRY + name in names, "Missing SDK class: " + JAVA_PACKAGE + "." + name)
+
+    def verify_maven_metadata(self, archive, source_pom):
+        require(POM_ENTRY in archive.namelist() and PROPERTIES_ENTRY in archive.namelist(),
+                "Missing Maven metadata for " + GROUP_ID + ":" + ARTIFACT_ID)
+        require(archive.read(POM_ENTRY) == source_pom.read_bytes(), "Embedded POM differs from source POM")
+        properties = archive.read(PROPERTIES_ENTRY).decode("utf-8")
+        for key, value in (("groupId", GROUP_ID), ("artifactId", ARTIFACT_ID), ("version", self.status["version"])):
+            matches = re.findall(r"^" + key + r"=(.*)$", properties, re.MULTILINE)
+            require(matches == [value], "Unexpected Maven property: " + key)
 
     def run_sdk_tests(self, sdk, jar):
         # These are executable test mains, not JUnit tests. Test the JAR resource loader;
@@ -252,7 +277,7 @@ class Build:
             test_env.pop(key, None)
         for test in SDK_TESTS:
             self.execute(test, ["java", "-cp", str(sdk / "target/test-classes") + ":" + str(jar),
-                                "io.ame." + test] + ([] if test == "NativeLibraryLoaderTest" else
+                                JAVA_PACKAGE + "." + test] + ([] if test == "NativeLibraryLoaderTest" else
                                 [self.run / "test-data" / test]), env=test_env)
 
     def prepare_package(self, jar, library, source_pom, native, version):
@@ -261,7 +286,7 @@ class Build:
         metadata = package / "metadata"
         metadata.mkdir(parents=True)
         shutil.copy2(str(jar), str(package / jar.name))
-        shutil.copy2(str(source_pom), str(package / ("ame-java-" + version + ".pom")))
+        shutil.copy2(str(source_pom), str(package / (ARTIFACT_ID + "-" + version + ".pom")))
         shutil.copy2(str(library), str(package / "libame_jni.so"))
         for name in NATIVE_METADATA:
             shutil.copy2(str(native / name), str(metadata / name))
@@ -283,7 +308,14 @@ class Build:
                     archive.add(str(path), arcname=path.relative_to(package).as_posix(), recursive=False)
         # Publish only after all build, packaging and JNI checks succeed.
         os.replace(str(archive_path), str(self.artifacts / BUNDLE))
-        (self.artifacts / "SHA256SUMS").write_text(digest(self.artifacts / BUNDLE) + "  " + BUNDLE + "\n", encoding="utf-8")
+        files = [self.artifacts / BUNDLE]
+        for suffix in (".jar", ".pom"):
+            name = ARTIFACT_ID + "-" + self.status["version"] + suffix
+            destination = self.artifacts / name
+            shutil.copy2(str(package / name), str(destination))
+            files.append(destination)
+        (self.artifacts / "SHA256SUMS").write_text("".join(
+            digest(path) + "  " + path.name + "\n" for path in sorted(files)), encoding="utf-8")
         self.status.update(status="VERIFIED", step="complete")
 
 

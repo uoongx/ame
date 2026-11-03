@@ -1,6 +1,6 @@
-package io.ame.examples;
+package com.huawei.convai.ame.examples;
 
-import io.ame.AmeEngine;
+import com.huawei.convai.ame.AmeEngine;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -15,7 +15,7 @@ public final class SdkQuickStart {
 
   public static void main(String[] args) throws IOException {
     if (args.length > 1) {
-      throw new IllegalArgumentException("Usage: io.ame.examples.SdkQuickStart [new-or-existing-demo-directory]");
+      throw new IllegalArgumentException("Usage: com.huawei.convai.ame.examples.SdkQuickStart [new-or-existing-demo-directory]");
     }
     Path directory = args.length == 0
         ? Files.createTempDirectory("ame-quickstart-")

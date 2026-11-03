@@ -1,5 +1,5 @@
 /target/
 /dist/
-/src/main/resources/io/ame/native/**/*.dll
-/src/main/resources/io/ame/native/**/*.so
-/src/main/resources/io/ame/native/**/*.dylib
+/src/main/resources/com/huawei/convai/ame/native/**/*.dll
+/src/main/resources/com/huawei/convai/ame/native/**/*.so
+/src/main/resources/com/huawei/convai/ame/native/**/*.dylib

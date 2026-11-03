@@ -1,4 +1,4 @@
-package io.ame;
+package com.huawei.convai.ame;
 
 import java.nio.file.Files;
 import java.nio.file.Path;

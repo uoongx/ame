@@ -1,4 +1,4 @@
-package io.ame;
+package com.huawei.convai.ame;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -31,7 +31,7 @@ final class NativeLibraryLoader {
     }
 
     String fileName = "libame_jni.so";
-    String resource = "/io/ame/native/" + platform + "/" + fileName;
+    String resource = "/com/huawei/convai/ame/native/" + platform + "/" + fileName;
     try (InputStream source = NativeLibraryLoader.class.getResourceAsStream(resource)) {
       if (source == null) {
         throw failure(

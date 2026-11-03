@@ -516,7 +516,7 @@ void save(Session& session) {
 extern "C" {
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM*, void*) { return JNI_VERSION_1_8; }
 
-JNIEXPORT jlong JNICALL Java_io_ame_AmeEngine_nativeOpen(JNIEnv* env, jclass, jstring directory) {
+JNIEXPORT jlong JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeOpen(JNIEnv* env, jclass, jstring directory) {
   return boundary<jlong>(env, 0, [&] {
     const std::string text = from_java(env, directory);
     if (text.empty() || text.find('\0') != std::string::npos) invalid("Directory must be a nonempty path without NUL");
@@ -532,7 +532,7 @@ JNIEXPORT jlong JNICALL Java_io_ame_AmeEngine_nativeOpen(JNIEnv* env, jclass, js
   });
 }
 
-JNIEXPORT jstring JNICALL Java_io_ame_AmeEngine_nativeRememberTurn(
+JNIEXPORT jstring JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeRememberTurn(
     JNIEnv* env, jclass, jlong handle, jstring speaker, jstring text, jlong epoch_seconds,
     jstring message_id, jstring session_id) {
   return boundary<jstring>(env, nullptr, [&] {
@@ -562,7 +562,7 @@ JNIEXPORT jstring JNICALL Java_io_ame_AmeEngine_nativeRememberTurn(
   });
 }
 
-JNIEXPORT jstring JNICALL Java_io_ame_AmeEngine_nativeRecall(JNIEnv* env, jclass, jlong handle, jstring query, jint limit) {
+JNIEXPORT jstring JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeRecall(JNIEnv* env, jclass, jlong handle, jstring query, jint limit) {
   return boundary<jstring>(env, nullptr, [&] {
     if (limit < 1 || limit > 100) invalid("Recall limit must be between 1 and 100");
     ame::SeedQuery seeds;
@@ -588,7 +588,7 @@ JNIEXPORT jstring JNICALL Java_io_ame_AmeEngine_nativeRecall(JNIEnv* env, jclass
   });
 }
 
-JNIEXPORT jstring JNICALL Java_io_ame_AmeEngine_nativeStats(JNIEnv* env, jclass, jlong handle) {
+JNIEXPORT jstring JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeStats(JNIEnv* env, jclass, jlong handle) {
   return boundary<jstring>(env, nullptr, [&] {
     auto session = find_session(handle);
     std::lock_guard<std::mutex> lock(session->mutex);
@@ -603,7 +603,7 @@ JNIEXPORT jstring JNICALL Java_io_ame_AmeEngine_nativeStats(JNIEnv* env, jclass,
   });
 }
 
-JNIEXPORT void JNICALL Java_io_ame_AmeEngine_nativeSave(JNIEnv* env, jclass, jlong handle) {
+JNIEXPORT void JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeSave(JNIEnv* env, jclass, jlong handle) {
   boundary<int>(env, 0, [&] {
     auto session = find_session(handle);
     std::lock_guard<std::mutex> lock(session->mutex);
@@ -613,7 +613,7 @@ JNIEXPORT void JNICALL Java_io_ame_AmeEngine_nativeSave(JNIEnv* env, jclass, jlo
   });
 }
 
-JNIEXPORT void JNICALL Java_io_ame_AmeEngine_nativeClose(JNIEnv* env, jclass, jlong handle) {
+JNIEXPORT void JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeClose(JNIEnv* env, jclass, jlong handle) {
   boundary<int>(env, 0, [&] {
     std::shared_ptr<Session> session;
     {
@@ -636,5 +636,5 @@ JNIEXPORT void JNICALL Java_io_ame_AmeEngine_nativeClose(JNIEnv* env, jclass, jl
   });
 }
 
-JNIEXPORT jint JNICALL Java_io_ame_AmeEngine_nativeVersion(JNIEnv*, jclass) { return 1; }
+JNIEXPORT jint JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeVersion(JNIEnv*, jclass) { return 1; }
 }  // extern "C"

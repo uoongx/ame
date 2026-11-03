@@ -41,8 +41,8 @@ target_link_libraries(ame_jni PRIVATE ame_engine Threads::Threads)
 # A JNI library is loaded by the JVM; it must not acquire a runtime dependency on libjvm.
 set_target_properties(ame_jni PROPERTIES OUTPUT_NAME ame_jni)
 set(AME_JAVA_RESOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/resources" CACHE PATH
-    "Resource root for the JAR (contains io/ame/native); defaults to the build directory")
-set(AME_JNI_RESOURCE_PATH "${AME_JAVA_RESOURCE_DIR}/io/ame/native/linux-x86_64")
+    "Resource root for the JAR (contains com/huawei/convai/ame/native); defaults to the build directory")
+set(AME_JNI_RESOURCE_PATH "${AME_JAVA_RESOURCE_DIR}/com/huawei/convai/ame/native/linux-x86_64")
 add_custom_command(TARGET ame_jni POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E make_directory "${AME_JNI_RESOURCE_PATH}"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:ame_jni>" "${AME_JNI_RESOURCE_PATH}/$<TARGET_FILE_NAME:ame_jni>"

@@ -30,7 +30,7 @@ readelf --version-info "$AME_LIBRARY" > "$AME_OUTPUT/elf-versions.txt"
 nm -D --defined-only "$AME_LIBRARY" > "$AME_OUTPUT/elf-exports.txt"
 sha256sum "$AME_LIBRARY" > "$AME_OUTPUT/native.sha256"
 for AME_SYMBOL in JNI_OnLoad nativeOpen nativeRememberTurn nativeRecall nativeStats nativeSave nativeClose nativeVersion; do
-  case "$AME_SYMBOL" in JNI_OnLoad) ;; *) AME_SYMBOL="Java_io_ame_AmeEngine_$AME_SYMBOL" ;; esac
+  case "$AME_SYMBOL" in JNI_OnLoad) ;; *) AME_SYMBOL="Java_com_huawei_convai_ame_AmeEngine_$AME_SYMBOL" ;; esac
   grep -q " $AME_SYMBOL$" "$AME_OUTPUT/elf-exports.txt" || { printf 'Missing export: %s\n' "$AME_SYMBOL" >&2; exit 1; }
 done
 if grep 'NEEDED' "$AME_OUTPUT/elf-dynamic.txt" | grep -E 'libstdc\+\+|libgcc_s|libjvm'; then
