@@ -1,18 +1,28 @@
 # 不依赖框架的 Java 示例
 
-这两个示例面向 Linux x86_64，只依赖 Java 17+ 和 `convai-ame-java-3.0.0-rc.2.jar`（`com.huawei.convai:convai-ame-java:3.0.0-rc.2`，无 classifier），无需 Spring、JSON 库或模型服务。SDK Java 包已迁移至 `com.huawei.convai.ame`，JNI 资源为 `com/huawei/convai/ame/native/linux-x86_64/libame_jni.so`；调用方须更新 import 并重新编译，Linux 平台限制不变。示例全部使用合成中文数据，请使用专用演示目录。
+这两个示例面向 Linux x86_64，只依赖 Java 17+ 和 `convai-ame-java-<version>.jar`（`com.huawei.convai:convai-ame-java:<version>`，无 classifier），无需 Spring、JSON 库或模型服务。`<version>` 表示所选 SDK 版本：当前源码版本以 [java/pom.xml](../pom.xml) 的顶层 `version` 为准，已出包版本以交付的 `convai-ame-java.pom` 或 `metadata/build.json` 为准。示例描述当前源码对应版本的用法。
+
+SDK Java 包已迁移至 `com.huawei.convai.ame`，JNI 资源为 `com/huawei/convai/ame/native/linux-x86_64/libame_jni.so`；调用方须更新 import 并重新编译，Linux 平台限制不变。示例全部使用合成中文数据，请使用专用演示目录。
 
 - `SdkQuickStart.java`：写入两条消息，召回、查看统计、保存，然后关闭并重新打开同一目录。
 - `PluggableAgentExample.java`：用应用自己的 `ContextProvider` 选择 legacy 或 AME。默认 legacy；模型回调记录输入消息的角色和长度并返回固定文本，没有调用真实 LLM，也不会解释召回 JSON。
 
 ## 编译与运行
 
-以下命令从 AME 仓库根目录执行，直接使用构建输出的独立 JAR。构建仅打包，不自动安装或远端发布；收到现成产物时可跳过构建。若只收到诊断归档，可按 [SDK README](../README.md) 解包并将 `JAR` 换成解包后的实际路径。编译需要 JDK 17+，`--release 17` 保持 Java 17 字节码兼容。两个示例已迁入 `com.huawei.convai.ame.examples` 包；源文件保留在当前目录，`javac -d` 会生成对应的包目录，运行时使用下面的新完整类名。
+以下命令从 AME 仓库根目录执行，从交付 POM 读取实际版本并选择同次构建的独立 JAR。构建仅打包，不自动安装或远端发布；收到现成产物时可跳过构建。若只收到诊断归档，可按 [SDK README](../README.md) 解包，将下面读取 POM 的路径和 `JAR` 路径一并改为解包目录。编译需要 JDK 17+，`--release 17` 保持 Java 17 字节码兼容。两个示例已迁入 `com.huawei.convai.ame.examples` 包；源文件保留在当前目录，`javac -d` 会生成对应的包目录，运行时使用下面的新完整类名。
+
+自动读取 POM 的辅助命令需要 Python 3；没有 Python 时，可省略 `AME_VERSION` 读取段，直接把 `JAR` 设为交付文件的实际路径。SDK 运行本身不依赖 Python。
 
 ```sh
 sh .cloudbuild/build.sh
 (cd build/cloudbuild/artifacts && sha256sum -c SHA256SUMS)
-JAR=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar
+AME_VERSION=$(python3 - <<'PY'
+import xml.etree.ElementTree as ET
+pom = ET.parse("build/cloudbuild/artifacts/convai-ame-java.pom")
+print(pom.findtext("{http://maven.apache.org/POM/4.0.0}version"))
+PY
+)
+JAR="build/cloudbuild/artifacts/convai-ame-java-${AME_VERSION}.jar"
 OUT=java/target/example-classes
 mkdir -p "$OUT"
 javac -encoding UTF-8 --release 17 -cp "$JAR" -d "$OUT" \
@@ -60,6 +70,6 @@ native 无法加载时 QuickStart 明确失败；可插拔示例记录 WARNING �
 
 ## 验证记录
 
-当前版本为 `3.0.0-rc.2`，[Linux 验证记录](../docs/LINUX-VALIDATION.md) 保留当时坐标、Java 包和文件名对应的验证结论，不自动覆盖本次迁包后的产物。流水线中 SDK smoke/boundary 通过不等于这两个集成示例已经运行；只有本次构建日志或验证记录中明确列出的实际执行项才算完成验证。
+当前源码版本以 [java/pom.xml](../pom.xml) 为准，实际运行版本以交付 POM 或元数据为准。[Linux 验证记录](../docs/LINUX-VALIDATION.md) 保留当时坐标、Java 包和文件名对应的验证结论，不自动覆盖后续产物。流水线中 SDK smoke/boundary 通过不等于这两个集成示例已经运行；只有本次构建日志或验证记录中明确列出的实际执行项才算完成验证。
 
-[RC1 历史验证](../docs/HISTORICAL-RC1-VALIDATION.md) 仅对应当时的产物，不能替代 RC2 验收。这里的模型始终是本地固定回调，示例运行不证明真实模型回答质量、流式取消行为或生产性能。
+[RC1 历史验证](../docs/HISTORICAL-RC1-VALIDATION.md) 仅对应当时的产物，不能替代当前交付物的验收。这里的模型始终是本地固定回调，示例运行不证明真实模型回答质量、流式取消行为或生产性能。

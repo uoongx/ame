@@ -1,6 +1,8 @@
 # AME Java SDK
 
-`com.huawei.convai:convai-ame-java:3.0.0-rc.2`（标准主 JAR，无 classifier）是面向 **Linux x86_64、Java 17+** 的嵌入式记忆 SDK。它通过 JNI 调用 AME C++ 引擎，没有第三方 Java 运行依赖，不绑定 Spring、Agent 框架或模型服务。SDK 是应用依赖库，不是可通过 `java -jar` 启动的服务。Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源也迁入对应路径；调用方须更新 import、反射类名或启动类名并重新编译。
+`com.huawei.convai:convai-ame-java:<version>`（标准主 JAR，无 classifier）是面向 **Linux x86_64、Java 17+** 的嵌入式记忆 SDK。`<version>` 表示所选 SDK 版本：当前源码版本以 [java/pom.xml](pom.xml) 的顶层 `version` 为准，已出包版本以交付的 `convai-ame-java.pom` 或 `metadata/build.json` 为准。本文介绍当前源码对应版本的实现。
+
+SDK 通过 JNI 调用 AME C++ 引擎，没有第三方 Java 运行依赖，不绑定 Spring、Agent 框架或模型服务。它是应用依赖库，不是可通过 `java -jar` 启动的服务。Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源也迁入对应路径；调用方须更新 import、反射类名或启动类名并重新编译。
 
 接入其他 Agent 时，使用 [接口参考](docs/API.md)、[通用集成指南](docs/INTEGRATION.md) 和 [可运行示例](examples/README.md)。provider、回退、身份鉴权与调度由应用实现，SDK 提供同步的记忆读写接口。
 
@@ -15,15 +17,15 @@ sh .cloudbuild/build.sh
 需要 JDK 17+、Maven 3.8+、CMake 3.24+、g++ / make、Python 3.8+ 和 binutils。公司 Maven settings、缓存、并行度及 glibc 上限配置见 [.cloudbuild 接入说明](../.cloudbuild/README.md)。该入口每次在隔离目录重新编译 JNI，打包本次 SO，显式执行真实 JNI 测试；全部成功后输出：
 
 ```text
-build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar
+build/cloudbuild/artifacts/convai-ame-java-<version>.jar
 build/cloudbuild/artifacts/convai-ame-java.pom
 build/cloudbuild/artifacts/convai-ame-java-linux-x86_64.tar.gz
 build/cloudbuild/artifacts/SHA256SUMS
 ```
 
-独立 JAR/POM 可直接作为公司平台制品发布步骤的输入，无需先解包；外部 `SHA256SUMS` 覆盖 JAR、POM 和诊断归档。归档保留与顶层产物一致的 JAR/POM 文件名、`libame_jni.so`、构建与测试元数据及内部 `SHA256SUMS`。交付 POM 固定命名为 `convai-ame-java.pom`，JAR 仍为 `convai-ame-java-<version>.jar`；POM 内部 GAV 和版本不变，坐标与版本仍取自 POM。构建仅打包，不自动执行 Maven `install` 或 `deploy`，也不新增远端发布配置。
+独立 JAR/POM 可直接作为公司平台制品发布步骤的输入，无需先解包；外部 `SHA256SUMS` 覆盖 JAR、POM 和诊断归档。归档保留与顶层产物一致的 JAR/POM 文件名、`libame_jni.so`、构建与测试元数据及内部 `SHA256SUMS`。交付 POM 固定命名为 `convai-ame-java.pom`，Maven groupId/artifactId 沿用上述坐标，实际版本从 POM 读取，JAR 命名为 `convai-ame-java-<version>.jar`。构建仅打包，不自动执行 Maven `install` 或 `deploy`，也不新增远端发布配置。
 
-归档内 `metadata/build.json` 记录 `group_id: "com.huawei.convai"`、`artifact_id: "convai-ame-java"`、`version: "3.0.0-rc.2"`、`java_package: "com.huawei.convai.ame"`、`classifier: null` 和 `platform: "linux-x86_64"`。`java_package` 区分同 GAV 下迁包前后的产物；无 classifier 不表示支持其他操作系统或 CPU 架构。
+归档内 `metadata/build.json` 记录 `group_id: "com.huawei.convai"`、`artifact_id: "convai-ame-java"`、`version: "<version>"`、`java_package: "com.huawei.convai.ame"`、`classifier: null` 和 `platform: "linux-x86_64"`，其中版本字段保存该交付物的实际版本。`java_package` 区分同 GAV 下迁包前后的产物；无 classifier 不表示支持其他操作系统或 CPU 架构。
 
 在源码仓库中解包和校验：
 
@@ -62,24 +64,31 @@ java -Dame.native.path=/absolute/path/libame_jni.so -jar your-agent.jar
 团队制品仓库已有该构件时直接声明依赖即可。仅需在当前机器试用时，可手动将构建输出安装到本地 Maven 仓库；此步骤不是构建入口的默认行为：
 
 ```sh
+AME_VERSION=$(python3 - <<'PY'
+import xml.etree.ElementTree as ET
+pom = ET.parse("build/cloudbuild/artifacts/convai-ame-java.pom")
+print(pom.findtext("{http://maven.apache.org/POM/4.0.0}version"))
+PY
+)
+JAR="build/cloudbuild/artifacts/convai-ame-java-${AME_VERSION}.jar"
 mvn install:install-file \
-  -Dfile=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar \
+  -Dfile="$JAR" \
   -DpomFile=build/cloudbuild/artifacts/convai-ame-java.pom
 ```
 
-固定名称仅用于交付文件，不改变 Maven 仓库布局。安装后 POM 仍位于仓库根目录下的 `com/huawei/convai/convai-ame-java/3.0.0-rc.2/convai-ame-java-3.0.0-rc.2.pom`。
+上述命令从交付 POM 读取版本，避免使用可能已更新的源码版本。固定名称仅用于交付文件，不改变 Maven 仓库布局。安装后 POM 仍位于仓库根目录下的 `com/huawei/convai/convai-ame-java/<version>/convai-ame-java-<version>.pom`。
 
-应用声明：
+在消费工程 `pom.xml` 的 `properties` 中定义 `ame.version` 为所选已发布版本（本地试用时填所安装的版本），再声明依赖。也可在消费工程执行 Maven 时通过 `-Dame.version=所选版本` 传入；该属性由消费工程管理，不自动读取 SDK 源码或升级依赖：
 
 ```xml
 <dependency>
   <groupId>com.huawei.convai</groupId>
   <artifactId>convai-ame-java</artifactId>
-  <version>3.0.0-rc.2</version>
+  <version>${ame.version}</version>
 </dependency>
 ```
 
-Gradle 使用 `implementation 'com.huawei.convai:convai-ame-java:3.0.0-rc.2'`，同样不带 classifier。本地安装只影响当前机器；公司平台的制品发布由平台已有步骤管理，本仓库不执行远端发布。历史 `io.ame:ame-java` 构件保持原样。本次迁包保留上述 GAV，消费时应核对 JAR 校验值，避免误用仍含旧 Java 包的本地缓存；源码引用改为以下新包：
+Gradle 在消费工程的 `gradle.properties` 中设置 `ameVersion` 为所选已发布版本，使用 `implementation "com.huawei.convai:convai-ame-java:${ameVersion}"`，同样不带 classifier，版本由消费工程显式选择。本地安装只影响当前机器；公司平台的制品发布由平台已有步骤管理，本仓库不执行远端发布。历史 `io.ame:ame-java` 构件保持原样。消费时应核对交付版本与 JAR 校验值，避免误用仍含旧 Java 包的本地缓存；源码引用改为以下新包：
 
 ```java
 import com.huawei.convai.ame.AmeEngine;
@@ -112,7 +121,13 @@ SDK 不接受模型 key。当前写入使用内置规则提取器和默认向量
 `.cloudbuild` 会显式运行 `AmeEngineSmokeTest` 和 `AmeEngineBoundaryTest`；它们是普通 Java main，`mvn package` 本身不会运行这些检查。以下命令可对构建输出的最终 JAR 重新验证，不设置外置 native 路径：
 
 ```sh
-JAR=build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar
+AME_VERSION=$(python3 - <<'PY'
+import xml.etree.ElementTree as ET
+pom = ET.parse("build/cloudbuild/artifacts/convai-ame-java.pom")
+print(pom.findtext("{http://maven.apache.org/POM/4.0.0}version"))
+PY
+)
+JAR="build/cloudbuild/artifacts/convai-ame-java-${AME_VERSION}.jar"
 CLASSES=java/target/test-classes
 mkdir -p "$CLASSES"
 javac --release 17 -encoding UTF-8 -cp "$JAR" -d "$CLASSES" \

@@ -1,6 +1,8 @@
 # AME Java SDK 接口参考
 
-适用版本：`com.huawei.convai:convai-ame-java:3.0.0-rc.2`（标准主 JAR，无 classifier），Linux x86_64、Java 17+，AME JNI ABI **1**。本文根据当前 `AmeEngine.java`、JNI 实现及底层引擎核实，面向直接依赖 JAR 的应用。Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源路径同步迁移；调用方须更新 import 并重新编译，Maven GAV、Linux 平台限制与 `ame.native.path` 属性保持不变。
+本文描述当前源码对应版本的 `com.huawei.convai:convai-ame-java:<version>` API（标准主 JAR，无 classifier），运行条件为 Linux x86_64、Java 17+，AME JNI ABI **1**。`<version>` 表示所选 SDK 版本：当前源码版本以 [java/pom.xml](../pom.xml) 的顶层 `version` 为准，已出包版本以交付的 `convai-ame-java.pom` 或 `metadata/build.json` 为准。接口依据当前 `AmeEngine.java`、JNI 实现及底层引擎核实。
+
+Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源路径同步迁移；调用方须更新 import 并重新编译。Maven groupId/artifactId、Linux 平台限制与 `ame.native.path` 属性保持不变，升级时应核对所选版本的接口文档。
 
 入口是 `com.huawei.convai.ame.AmeEngine`，它实现 `AutoCloseable`。调用在当前 JVM 进程内同步执行；SDK 没有 HTTP endpoint、服务端口、模型 key 或远程存储配置。返回的记忆证据由应用解析并交给自己的模型，SDK 不生成回答。
 
@@ -254,6 +256,6 @@ java -Dame.native.path=/absolute/path/libame_jni.so -jar your-agent.jar
 
 该属性须在首次 `open()` 前设置；同一类加载器生命周期只加载一次库，之后改属性不会切换已加载的库。JNI 导出符号随 Java 类名迁移，因此外置 SO 也须替换为同次构建产物；ABI 编号仍为 1 不表示可以复用 `io.ame` 旧库。SDK 不从自定义环境变量或 HTTP 配置读取此值，也不自动下载缺失的库。
 
-当前交付文件为 `build/cloudbuild/artifacts/convai-ame-java-3.0.0-rc.2.jar` 及同目录的 `convai-ame-java.pom`，使用上述标准 Maven 坐标引用，不带 classifier。固定的只是交付 POM 文件名，其内部 GAV、版本及 Maven 仓库的标准带版本布局不变。构建入口仍是 `sh .cloudbuild/build.sh`，只打包本地产物，不自动 `install` 或 `deploy`；诊断归档和校验步骤见 [SDK README](../README.md)。Linux 运行时还必须满足实际 SO 的 glibc 要求；构建默认不设置版本上限，仅在显式配置 `AME_MAX_GLIBC` 时检查。实际要求以本次归档 `metadata/build.json` 的 `required_glibc` 及测试日志为准，[Linux 验证记录](LINUX-VALIDATION.md) 保留其记录的历史坐标、Java 包与产物证据。版本号和 Java 字节码目标都不能替代目标系统验证。
+交付文件为 `build/cloudbuild/artifacts/convai-ame-java-<version>.jar` 及同目录的 `convai-ame-java.pom`，版本从这份交付 POM 或归档元数据读取，使用上述标准 Maven 坐标引用，不带 classifier。固定的只是交付 POM 文件名，groupId/artifactId 沿用上述坐标，Maven 仓库仍使用标准带版本布局。构建入口仍是 `sh .cloudbuild/build.sh`，只打包本地产物，不自动 `install` 或 `deploy`；诊断归档和校验步骤见 [SDK README](../README.md)。Linux 运行时还必须满足实际 SO 的 glibc 要求；构建默认不设置版本上限，仅在显式配置 `AME_MAX_GLIBC` 时检查。实际要求以本次归档 `metadata/build.json` 的 `required_glibc` 及测试日志为准，[Linux 验证记录](LINUX-VALIDATION.md) 保留其记录的历史坐标、Java 包与产物证据。版本号和 Java 字节码目标都不能替代目标系统验证。
 
 本文以现有六方法 API 为边界。C++ 内部的注册实体、精确查询、时间过滤、修改权重等能力没有因此自动成为 Java 公共接口；应用适配层的 provider、用户缓存和失败回退也不是 SDK 内置配置项。
