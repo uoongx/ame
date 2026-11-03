@@ -96,7 +96,6 @@ public class SessionStore {
                         o.optString("type", "chat"),
                         o.has("pdf") ? o.getString("pdf") : null));
             }
-            // sortedByDescending { createdAt }
             out.sort(Comparator.comparingLong((Session s) -> s.createdAt).reversed());
             return out;
         } catch (IOException | JSONException e) {

@@ -198,6 +198,9 @@ q3/q156（A 类 2 题）四题**不在任何句级机制的上限内**（金标�
 
 ## 7. 复跑命令
 
+以下保留历史实验命令。相关 C++ 源码现已归档至 `bench/scripts/archive_retired/`，
+预编译的 `oracle_ceiling.exe` 已移除；复跑需使用匹配的历史源码，并将本地构建产物放入 `build/`。
+
 ```bash
 # 构建 oracle 工具（一次性；引擎代码零改动，纯脚本侧链接 libame_*.a）
 export PATH="$(dirname $(which g++)):$PATH"

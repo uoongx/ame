@@ -19,6 +19,8 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
 #include <map>
 #include <set>
 #include <sstream>
@@ -279,10 +281,11 @@ int main(int argc, char** argv) {
         if (pool_nodes[ord[i]]->uid == u) { pos = (int)i + 1; break; }
       auto* n = e.storage().get_node(u);
       std::string dia = n && n->attrs.count("dia_id") ? n->attrs.at("dia_id") : "?";
-      double c = 0;
+      double content_score = 0;
       for (size_t i = 0; i < pool_nodes.size(); ++i)
-        if (pool_nodes[i]->uid == u) c = cs[i];
-      std::printf(" %s(dia=%s): BM25rank=%d/得分%.4f;", u.c_str(), dia.c_str(), pos, c);
+        if (pool_nodes[i]->uid == u) content_score = cs[i];
+      std::cout << ' ' << u << "(dia=" << dia << "): BM25rank=" << pos
+                << "/得分" << std::fixed << std::setprecision(4) << content_score << ';';
     }
     std::printf("\n");
   }

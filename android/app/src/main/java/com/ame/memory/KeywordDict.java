@@ -40,7 +40,7 @@ public final class KeywordDict {
                 copyAsset(ctx, DICT_NAME, dict);
             }
             File cache = new File(dir, AC_NAME);
-            int n = engine.loadKeywordDict(dict.getAbsolutePath(), cache.getAbsolutePath());
+            int n = engine.loadKeywordDict(dict.getCanonicalPath(), cache.getCanonicalPath());
             if (n >= 0) {
                 if (!attempted) Log.i(TAG, "关键词词典加载完成: " + n + " 条");
             } else {

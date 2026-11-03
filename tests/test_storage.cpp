@@ -4,10 +4,36 @@
 #include "ame/storage/storage.h"
 #include "ame/core/json.h"
 #include "test_util.hpp"
+#include "test_temp_dir.hpp"
 
 #include <limits>
+#include <sys/stat.h>
 
 using namespace ame;
+
+static void test_private_temporary_directory() {
+  std::filesystem::path removed;
+  {
+    const ame_test::TempDirectory first, second;
+    CHECK(first.root() != second.root());
+    CHECK(first.root().parent_path() == std::filesystem::current_path());
+    struct stat info {};
+    CHECK(::stat(first.root().c_str(), &info) == 0);
+    CHECK((info.st_mode & 0777) == 0700);
+    ame_test::write_text_file(first.path("fixture.txt"), "private fixture");
+    CHECK(std::filesystem::exists(first.path("fixture.txt")));
+    CHECK(!std::filesystem::exists(second.path("fixture.txt")));
+    const std::vector<std::string> invalid = {"", ".", "..", "../escape", "/absolute",
+                                             "nested/file", "nested\\file", std::string("a\0b", 3)};
+    for (const auto& leaf : invalid) {
+      bool rejected = false;
+      try { first.path(leaf); } catch (const std::invalid_argument&) { rejected = true; }
+      CHECK(rejected);
+    }
+    removed = first.root();
+  }
+  CHECK(!std::filesystem::exists(removed));
+}
 
 static void test_adjacency_and_snapshot() {
   Storage s;
@@ -30,7 +56,7 @@ static void test_adjacency_and_snapshot() {
   CHECK(s.get_node("nope") == nullptr);
 
   // 快照 save/load 往返一致
-  std::string path = "/tmp/ame_test_snapshot.json";
+  std::string path = ame_test::temp_path("snapshot.json");
   CHECK(s.save(path) == Err::Ok);
   Storage s2;
   CHECK(s2.load(path) == Err::Ok);
@@ -138,6 +164,7 @@ static void test_invalid_snapshot_preserves_graph() {
 }
 
 int main() {
+  test_private_temporary_directory();
   test_adjacency_and_snapshot();
   test_upsert_and_geo();
   test_snapshot_defaults_and_numeric_boundaries();

@@ -10,12 +10,16 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 
 /** Native lifecycle and corrupt-snapshot checks; execute against the packaged JNI library. */
 public final class AmeEngineBoundaryTest {
+  private static final Logger LOG = Logger.getLogger(AmeEngineBoundaryTest.class.getName());
+
   private AmeEngineBoundaryTest() {}
 
   public static void main(String[] args) throws Exception {
@@ -36,7 +40,7 @@ public final class AmeEngineBoundaryTest {
     unicodeScalarBoundaries(root);
     failedCloseReleasesDirectory(root);
     concurrentNativeClose(root);
-    System.out.println("AME native boundary checks passed: " + root.toAbsolutePath());
+    LOG.info("AME native boundary checks passed: " + root.toAbsolutePath());
   }
 
   private static void unicodeAndDirectoryLock(Path root) throws Exception {
@@ -215,31 +219,49 @@ public final class AmeEngineBoundaryTest {
     Method stats = nativeMethod("nativeStats", long.class);
     Method close = nativeMethod("nativeClose", long.class);
     for (int round = 0; round < 12; round++) {
-      long handle = (Long) open.invoke(null, root.resolve("race-" + round).toAbsolutePath().toString());
-      var pool = Executors.newFixedThreadPool(5);
-      try {
-        CountDownLatch start = new CountDownLatch(1);
-        List<Future<?>> futures = new ArrayList<>();
-        for (int thread = 0; thread < 4; thread++) {
-          futures.add(pool.submit(() -> {
-            start.await();
-            for (int i = 0; i < 100; i++) {
-              try {
-                stats.invoke(null, handle);
-              } catch (InvocationTargetException error) {
-                check(error.getCause() instanceof IllegalStateException, "Unexpected native race failure");
-              }
-            }
-            return null;
-          }));
-        }
-        futures.add(pool.submit(() -> { start.await(); close.invoke(null, handle); return null; }));
-        start.countDown();
-        for (Future<?> future : futures) future.get(15, TimeUnit.SECONDS);
-      } finally {
-        pool.shutdownNow();
-        close.invoke(null, handle);
-      }
+      runNativeCloseRace(root.resolve("race-" + round), open, stats, close);
+    }
+  }
+
+  private static void runNativeCloseRace(Path directory, Method open, Method stats, Method close)
+      throws Exception {
+    long handle = (Long) open.invoke(null, directory.toAbsolutePath().toString());
+    var pool = Executors.newFixedThreadPool(5);
+    try {
+      CountDownLatch start = new CountDownLatch(1);
+      List<Future<?>> futures = submitStatsReaders(pool, start, stats, handle);
+      futures.add(pool.submit(() -> { start.await(); close.invoke(null, handle); return null; }));
+      start.countDown();
+      for (Future<?> future : futures) future.get(15, TimeUnit.SECONDS);
+    } finally {
+      pool.shutdownNow();
+      close.invoke(null, handle);
+    }
+  }
+
+  private static List<Future<?>> submitStatsReaders(ExecutorService pool, CountDownLatch start,
+                                                   Method stats, long handle) {
+    List<Future<?>> futures = new ArrayList<>();
+    for (int thread = 0; thread < 4; thread++) {
+      futures.add(pool.submit(() -> readStatsAfterStart(start, stats, handle)));
+    }
+    return futures;
+  }
+
+  private static Void readStatsAfterStart(CountDownLatch start, Method stats, long handle)
+      throws Exception {
+    start.await();
+    for (int i = 0; i < 100; i++) {
+      readStatsAllowingClosedHandle(stats, handle);
+    }
+    return null;
+  }
+
+  private static void readStatsAllowingClosedHandle(Method stats, long handle) throws Exception {
+    try {
+      stats.invoke(null, handle);
+    } catch (InvocationTargetException error) {
+      check(error.getCause() instanceof IllegalStateException, "Unexpected native race failure");
     }
   }
 

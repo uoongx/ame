@@ -6,8 +6,8 @@
  * 集成测试（真实 API）默认跳过，设 AME_RUN_LLM_IT=1 才执行。
  */
 #include <atomic>
-#include <chrono>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -18,13 +18,13 @@
 #include "ame/llm/components.h"
 #include "ame/llm/llm.h"
 #include "test_util.hpp"
+#include "test_temp_dir.hpp"
 
 using namespace ame;
 
 static void test_client_cache_and_retry() {
-  std::string dir = "/tmp/ame_test_llm_cache";
-  std::filesystem::remove_all(dir);
-  std::filesystem::create_directories(dir);
+  const ame_test::TempDirectory cache;
+  const std::string dir = cache.root().string();
 
   DeepSeekClient c("https://example.invalid", "test-key-not-real", "m", dir);
   int calls = 0;
@@ -234,23 +234,10 @@ static void test_extract_batch() {
 
 // 唯一临时目录隔离词典检查点；所有 LLM 调用均为内存 fake。
 struct LexiconFiles {
-  std::filesystem::path directory;
-  LexiconFiles() {
-    static std::atomic<unsigned> sequence{0};
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    directory = std::filesystem::temp_directory_path() /
-        ("ame-lexicon-" + std::to_string(stamp) + "-" + std::to_string(sequence++));
-    std::filesystem::create_directories(directory);
-  }
-  ~LexiconFiles() {
-    std::error_code ignored;
-    std::filesystem::remove_all(directory, ignored);
-  }
-  std::string path(const std::string& name) const { return (directory / name).string(); }
+  const ame_test::TempDirectory directory;
+  std::string path(const std::string& name) const { return directory.path(name); }
   void write(const std::string& name, const Json& value) const {
-    std::ofstream output(path(name));
-    output << value.dump();
-    CHECK(output.good());
+    ame_test::write_text_file(path(name), value.dump());
   }
   Json read(const std::string& name) const {
     std::ifstream input(path(name));
@@ -313,7 +300,9 @@ static void test_lexicon_cross_chunk() {
   CHECK(score.received.size() == 101 && validate.received.size() == 101);
 }
 
-struct LexiconInterrupted {};
+struct LexiconInterrupted final : std::exception {
+  const char* what() const noexcept override { return "Lexicon test interrupted at a chunk boundary"; }
+};
 class InterruptingLexiconClient : public FakeLlmClient {
  public:
   int batches = 0;
@@ -520,8 +509,9 @@ int main() {
   test_extraction_field_defaults();
   // 集成测试（真实 API）默认跳过
   if (std::getenv("AME_RUN_LLM_IT")) {
+    const ame_test::TempDirectory cache;
     auto client = DeepSeekClient::from_config("bench/config/deepseek.local.json",
-                                              "deepseek-v4-flash", "/tmp/ame_llm_it_cache");
+                                              "deepseek-v4-flash", cache.root().string());
     if (client) {
       std::string r = client->chat({{"user", "只回答 ok"}}, {0.0, 8, false});
       CHECK(!r.empty());

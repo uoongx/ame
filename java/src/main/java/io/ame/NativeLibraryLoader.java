@@ -54,6 +54,9 @@ final class NativeLibraryLoader {
 
   private static void loadFile(Path library, String origin) {
     try {
+      // Required JNI bootstrap. The caller supplies either the fixed JAR resource
+      // extracted into a private directory, or a trusted JVM startup configuration.
+      // Request/user data must never be used to populate ame.native.path.
       System.load(library.toString());
     } catch (UnsatisfiedLinkError | SecurityException error) {
       throw failure(

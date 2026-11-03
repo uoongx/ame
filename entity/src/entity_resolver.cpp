@@ -29,6 +29,7 @@
 #include "ame/vector/vector_service.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace ame {
 
@@ -226,7 +227,9 @@ ResolveResult EntityResolver::resolve_candidates(const std::string& surface,
     rr.uid = register_entity("person", surface);
     rr.is_new = true;
     rr.suspected_dup = true;
-    storage_.get_node_mut(rr.uid)->attrs["suspected_dup_of"] = best->uid;
+    Node* created = storage_.get_node_mut(rr.uid);
+    if (!created) throw std::logic_error("Newly registered entity is missing: " + rr.uid);
+    created->attrs["suspected_dup_of"] = best->uid;
   }
   rr.mention_uid = create_mention(surface, rr.uid, rr.confidence);
   return rr;
@@ -283,9 +286,9 @@ EntityCard EntityResolver::get_entity(const std::string& uid) const {
 //   步骤5：redirect_[a]=b 登记跳转，旧号永不复用；返回 Ok
 Err EntityResolver::merge_entities(const std::string& uid_a, const std::string& into_b) {
   std::string a = redirect(uid_a), b = redirect(into_b);
-  const Node* na = storage_.get_node(a);
-  const Node* nb = storage_.get_node(b);
-  if (!na || !nb) return Err::NotFound;
+  Node* source = storage_.get_node_mut(a);
+  Node* target = storage_.get_node_mut(b);
+  if (!source || !target) return Err::NotFound;
   if (a == b) return Err::InvalidArg;
 
   // 收集并重指向 a 的所有边（出/入两方向）
@@ -295,13 +298,10 @@ Err EntityResolver::merge_entities(const std::string& uid_a, const std::string& 
     ne.attrs.erase("_reversed");
     moved.push_back(ne);
   }
-  Node* ma = storage_.get_node_mut(a);
-  ma->attrs["merged_into"] = b;
-  for (auto& kv : na->attrs) {  // 标识符并入 b
-    if (kv.first.rfind("id:", 0) == 0) {
-      Node* mb = storage_.get_node_mut(b);
-      if (!mb->attrs.count(kv.first)) mb->attrs[kv.first] = kv.second;
-    }
+  source->attrs["merged_into"] = b;
+  for (const auto& kv : source->attrs) {  // 标识符并入 b，保留目标已有值
+    if (kv.first.rfind("id:", 0) != 0) continue;
+    if (!target->attrs.count(kv.first)) target->attrs[kv.first] = kv.second;
   }
   for (auto& e : moved) {
     Edge ne = e;
@@ -409,21 +409,31 @@ Json EntityResolver::slots_to_json() const {
   return root;
 }
 
+namespace {
+SlotRecord slot_record_from_json(const Json& record) {
+  const Json* slot = record.find("slot");
+  const Json* value = record.find("value");
+  const Json* valid_from = record.find("valid_from");
+  const Json* valid_to = record.find("valid_to");
+  const Json* source_event = record.find("src");
+  SlotRecord result;
+  result.slot = slot ? slot->as_str() : "";
+  result.value = value ? value->as_str() : "";
+  result.valid_from = (TimePoint)(valid_from ? valid_from->as_num() : 0);
+  result.valid_to = (TimePoint)(valid_to ? valid_to->as_num() : 0);
+  result.source_event = source_event ? source_event->as_str() : "";
+  return result;
+}
+}  // namespace
+
 // slots_from_json 伪代码：清空后按 uid 逐条还原（宽容：缺字段用默认值）。
 void EntityResolver::slots_from_json(const Json& j) {
   slots_.clear();
   if (j.kind != Json::Obj) return;
-  for (auto& [uid, arr] : j.obj) {
+  for (const auto& [uid, arr] : j.obj) {
     if (arr.kind != Json::Arr) continue;
-    for (auto& r : arr.arr) {
-      SlotRecord s;
-      s.slot = r.find("slot") ? r.find("slot")->as_str() : "";
-      s.value = r.find("value") ? r.find("value")->as_str() : "";
-      s.valid_from = (TimePoint)(r.find("valid_from") ? r.find("valid_from")->as_num() : 0);
-      s.valid_to = (TimePoint)(r.find("valid_to") ? r.find("valid_to")->as_num() : 0);
-      s.source_event = r.find("src") ? r.find("src")->as_str() : "";
-      slots_[uid].push_back(std::move(s));
-    }
+    for (const auto& record : arr.arr)
+      slots_[uid].push_back(slot_record_from_json(record));
   }
 }
 

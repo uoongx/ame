@@ -27,6 +27,8 @@
 
 #include <algorithm>
 
+#include <stdexcept>
+
 namespace ame {
 
 // 构造：保存 M9 存储、M3 关键词、M10 时间、M13 向量四个依赖的引用
@@ -195,10 +197,11 @@ WriteResult GraphWriter::write_event(
   result.event_id = event.uid;
   auto entities = link_entities(event.uid, extraction, resolved_entities, result);
   auto place = link_place(event.uid, extraction.place);
-  auto keywords = link_keywords(event.uid, extraction.keywords);
+  // Graph node identifiers for linked lexical concepts; no credentials are stored here.
+  auto linked_term_uids = link_keywords(event.uid, extraction.keywords);
   link_next(event.uid);
-  auto_grow(event, entities, keywords, place);
-  supersede_pass(event, entities, keywords);
+  auto_grow(event, entities, linked_term_uids, place);
+  supersede_pass(event, entities, linked_term_uids);
   return result;
 }
 
@@ -212,6 +215,15 @@ WriteResult GraphWriter::write_event(
 //        视为被本事件更新的同槽位旧事实；
 // 步骤4：给旧事件标 attrs["valid_to"]=本事件 ts（事实失效时刻），并写
 //        新事件 -[:SUPERSEDES]-> 旧事件 边（旧记录不覆盖、可追溯，as_of 查询可取历史值）。
+void GraphWriter::supersede_event(const Node& event, const std::string& previous_uid,
+                                  const std::string& slot, const std::string& entity_uid) {
+  Node* previous = storage_.get_node_mut(previous_uid);
+  if (!previous) throw std::logic_error("Cannot supersede a missing event: " + previous_uid);
+  previous->attrs["valid_to"] = std::to_string(event.ts);
+  storage_.put_edge(Edge{event.uid, previous_uid, RelType::SUPERSEDES, 1.0,
+                         {{"slot", slot}, {"entity", entity_uid}}});
+}
+
 void GraphWriter::supersede_pass(const Node& ev, const std::vector<std::string>& entity_uids,
                                  const std::vector<std::string>& kw_uids) {
   if (entity_uids.empty() || kw_uids.empty()) return;
@@ -232,9 +244,7 @@ void GraphWriter::supersede_pass(const Node& ev, const std::vector<std::string>&
       if (old->attrs.count("valid_to")) continue;  // 已被取代
       for (auto& euid : entity_uids) {
         if (!storage_.find_edge(old->uid, euid, RelType::INVOLVES)) continue;
-        storage_.get_node_mut(old->uid)->attrs["valid_to"] = std::to_string(ev.ts);
-        storage_.put_edge(Edge{ev.uid, old->uid, RelType::SUPERSEDES, 1.0,
-                               {{"slot", kn->name}, {"entity", euid}}});
+        supersede_event(ev, old->uid, kn->name, euid);
         break;  // 一个旧事件只需被取代一次
       }
     }
@@ -285,19 +295,23 @@ void GraphWriter::auto_grow(const Node& ev, const std::vector<std::string>& enti
   // ③ IN/NEAR 已在 get_or_create_place 中处理
 
   // ④ 推导标签：地方时/场所时段/人生阶段（调 M10）
+  annotate_event(ev, entity_uids, place_uid);
+}
+
+void GraphWriter::annotate_event(const Node& event, const std::vector<std::string>& entity_uids,
+                                  const std::string& place_uid) {
+  Node* stored_event = storage_.get_node_mut(event.uid);
+  if (!stored_event) throw std::logic_error("Cannot annotate a missing event: " + event.uid);
   const Node* place = place_uid.empty() ? nullptr : storage_.get_node(place_uid);
   if (place) {
-    auto lp = ts_.project_local(ev.ts, place);
-    Node* m = storage_.get_node_mut(ev.uid);
-    m->attrs["local_period"] = lp.period;
-    if (lp.after_hours) m->attrs["after_hours"] = "1";
+    auto local = ts_.project_local(event.ts, place);
+    stored_event->attrs["local_period"] = local.period;
+    if (local.after_hours) stored_event->attrs["after_hours"] = "1";
   }
-  for (auto& euid : entity_uids) {
-    std::string phase = ts_.match_phase(ev.ts, euid);
-    if (!phase.empty()) {
-      Node* m = storage_.get_node_mut(ev.uid);
-      if (m->attrs["phase"].empty()) m->attrs["phase"] = phase;
-    }
+  for (const auto& entity_uid : entity_uids) {
+    std::string phase = ts_.match_phase(event.ts, entity_uid);
+    if (phase.empty()) continue;
+    if (stored_event->attrs["phase"].empty()) stored_event->attrs["phase"] = phase;
   }
 }
 

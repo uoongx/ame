@@ -122,9 +122,56 @@ static void test_anchor_deduplication_and_write_sequence() {
   CHECK(storage.find_edge(next.event_id, actor.uid, RelType::INVOLVES)->attrs.at("role") == "人物");
 }
 
+static void test_event_annotation_and_supersession() {
+  Storage storage;
+  KeywordManager terms(storage);
+  TimeService time(&storage);
+  VectorService vectors(&storage);
+  GraphWriter writer(storage, terms, time, vectors);
+  Node actor, other, phase, other_phase, place;
+  actor.uid = "actor"; actor.kind = NodeKind::Entity;
+  other.uid = "other"; other.kind = NodeKind::Entity;
+  phase.uid = "phase"; phase.kind = NodeKind::Phase; phase.name = "first phase";
+  other_phase.uid = "other-phase"; other_phase.kind = NodeKind::Phase; other_phase.name = "second phase";
+  place.uid = "place"; place.kind = NodeKind::Place; place.name = "venue";
+  place.attrs = {{"tz_offset", "8"}, {"open_hours", "08:00-22:00"}};
+  for (const Node* node : {&actor, &other, &phase, &other_phase, &place}) storage.put_node(*node);
+  storage.put_edge(Edge{actor.uid, phase.uid, RelType::LIFE_PHASE, 1.0, {}});
+  storage.put_edge(Edge{other.uid, other_phase.uid, RelType::LIFE_PHASE, 1.0, {}});
+  Extraction extraction;
+  extraction.event.text = "old fact";
+  extraction.event.time = 1700000000;
+  extraction.place.name = place.name;
+  extraction.keywords = {{"residence", "attr"}};
+  const std::vector<std::pair<std::string, std::string>> actors = {
+      {"absent", "missing"}, {"actor", actor.uid}, {"other", other.uid}};
+  auto first = writer.write_event(extraction, actors);
+  const Node* event = storage.get_node(first.event_id);
+  CHECK(first.code == Err::Ok && first.resolved.size() == 2 && event);
+  if (!event) return;
+  CHECK(event->attrs.at("local_period") == "清晨");
+  CHECK(event->attrs.at("after_hours") == "1");
+  CHECK(event->attrs.at("phase") == "first phase");
+  extraction.event.text = "new fact";
+  extraction.event.time += 60;
+  auto second = writer.write_event(extraction, actors);
+  CHECK(second.code == Err::Ok);
+  CHECK(event->attrs.at("valid_to") == std::to_string(extraction.event.time));
+  const Edge* supersedes = storage.find_edge(second.event_id, first.event_id, RelType::SUPERSEDES);
+  CHECK(supersedes && supersedes->attrs.at("slot") == "residence");
+  CHECK(supersedes && supersedes->attrs.at("entity") == actor.uid);
+  Extraction isolated;
+  isolated.event.text = "event without valid anchors";
+  auto third = writer.write_event(isolated, {{"missing", "missing"}});
+  event = storage.get_node(third.event_id);
+  CHECK(third.code == Err::Ok && third.resolved.empty() && event);
+  CHECK(event && !event->attrs.count("phase") && !event->attrs.count("local_period"));
+}
+
 int main() {
   test_autogrow();
   test_summarize();
   test_anchor_deduplication_and_write_sequence();
+  test_event_annotation_and_supersession();
   return AME_TEST_REPORT();
 }

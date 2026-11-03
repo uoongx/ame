@@ -175,54 +175,65 @@ public class MemoryOrchestrator {
                 + " 重排=" + deepRerank
                 + " history=" + history.size() + "条");
 
-        // 图片轮的记忆文本 = "[图片] " + 随图文字，无随图文字时调 M3 vision 生成
-        // 一句话描述（失败存占位文本）——让图片语义可被检索（图片本体不进记忆图）
-        String memoryText;
-        if (imageB64 == null) {
-            memoryText = userText;
-        } else if (!userText.trim().isEmpty()) {   // isNotBlank
-            memoryText = "[图片] " + userText;
-        } else {
-            String cap = MiniMaxClient.visionCaption(imageB64);
-            memoryText = "[图片] " + (cap.isEmpty() ? "用户分享了一张图片" : cap);  // ifBlank
-        }
+        String memoryText = memoryTextForTurn(userText, imageB64);
         Log.d(TAG, "[" + sessionId + "] 记忆文本: " + take(memoryText, 120));
+        String searchText = searchForTurn(userText, imageB64, memoryText, webSearch);
 
-        // 联网流程第 1 轮：只查内容，不写入记忆（搜索结果时效性强，入库会污染召回）
-        String searchText = null;
-        if (webSearch) {
-            try {
-                String q = userText.trim().isEmpty() ? memoryText : userText;
-                if (imageB64 != null) {
-                    String desc = MiniMaxClient.visionForSearch(imageB64);
-                    if (!desc.isEmpty()) {
-                        q = userText.trim().isEmpty()
-                                ? "图片内容：" + desc
-                                : q + "\n（附图内容：" + desc + "）";
-                    }
-                    Log.d(TAG, "[" + sessionId + "] 联网+带图：M3 vision 解析并入查询");
-                }
-                searchText = MiniMaxClient.webSearch(q);
-                Log.d(TAG, "[" + sessionId + "] 联网检索完成 " + searchText.length() + "字");
-            } catch (Exception e) {
-                Log.e(TAG, "[" + sessionId + "] 联网搜索失败，降级为不联网作答", e);
-                searchText = null;
-            }
-        }
-
-        // 装配（含 recall 取证 [+可选深度重排] + 联网搜索结果注入）——当前问题不入图，也不占证据位
-        String query = userText.trim().isEmpty() ? memoryText : userText;   // ifBlank
+        // 先取证和装配，再作答；当前问题不入图、不占证据位。
+        String query = queryForTurn(userText, memoryText);
         List<MiniMaxClient.Msg> msgs = assemble(query, history, userText, imageB64,
                 webSearch, searchText, deepRerank);
-
-        // 第 2 轮：M3 本地非联网作答（搜索结果+提问+记忆均在 system/窗口中）
         String reply = MiniMaxClient.chat(msgs);
         Log.d(TAG, "[" + sessionId + "] 回复 " + reply.length() + "字: "
-                + take(reply.replace('\n', ' '), 100));   // take(100)
+                + take(reply.replace('\n', ' '), 100));
 
-        // 整轮写入：提问 → 回答 合成一条记忆事件 + 双侧消息落盘；
-        // 快照节流：全量 graph.json dump 每轮跑会随图变大而越来越卡（O(N²)），
-        // 改为每 SAVE_EVERY 轮一次 + 页面销毁时 JNI 兜底 save
+        // 作答成功才写入整轮；模型或装配抛异常时不进入持久化阶段。
+        persistSuccessfulTurn(memoryText, reply, imagePath, now);
+        return reply;
+    }
+
+    /** 图片本体不入图；仅在无随图文字时调用 caption，空描述使用原占位文本。 */
+    private static String memoryTextForTurn(String userText, String imageB64) {
+        if (imageB64 == null) return userText;
+        if (!userText.trim().isEmpty()) return "[图片] " + userText;
+        String caption = MiniMaxClient.visionCaption(imageB64);
+        return "[图片] " + (caption.isEmpty() ? "用户分享了一张图片" : caption);
+    }
+
+    private static String queryForTurn(String userText, String memoryText) {
+        return userText.trim().isEmpty() ? memoryText : userText;
+    }
+
+    /** 第 1 轮只检索；图片解析和检索仍处于同一失败降级边界。 */
+    private String searchForTurn(String userText, String imageB64, String memoryText,
+                                 boolean webSearch) {
+        if (!webSearch) return null;
+        try {
+            String query = searchQueryForTurn(userText, imageB64, memoryText);
+            String searchText = MiniMaxClient.webSearch(query);
+            Log.d(TAG, "[" + sessionId + "] 联网检索完成 " + searchText.length() + "字");
+            return searchText;
+        } catch (Exception e) {
+            Log.e(TAG, "[" + sessionId + "] 联网搜索失败，降级为不联网作答", e);
+            return null;
+        }
+    }
+
+    private String searchQueryForTurn(String userText, String imageB64, String memoryText) {
+        String query = queryForTurn(userText, memoryText);
+        if (imageB64 == null) return query;
+        String description = MiniMaxClient.visionForSearch(imageB64);
+        if (!description.isEmpty()) {
+            query = userText.trim().isEmpty()
+                    ? "图片内容：" + description
+                    : query + "\n（附图内容：" + description + "）";
+        }
+        Log.d(TAG, "[" + sessionId + "] 联网+带图：M3 vision 解析并入查询");
+        return query;
+    }
+
+    /** 整轮记忆、双侧消息依次落盘；每 SAVE_EVERY 个完成轮次保存快照。 */
+    private void persistSuccessfulTurn(String memoryText, String reply, String imagePath, long now) {
         String pair = memoryText + "\n→ " + reply;
         int rc = engine.rememberTurn("user", pair, now, "u" + now, sessionId);
         store.appendMessage(sessionId, new Message("user", memoryText, now, imagePath));
@@ -232,7 +243,6 @@ public class MemoryOrchestrator {
         Log.d(TAG, "[" + sessionId + "] rememberTurn(整轮) rc=" + rc
                 + (turnCount % SAVE_EVERY == 0 ? " save rc=" + rcS : " (快照节流)")
                 + "，本轮完成");
-        return reply;
     }
 
     // assemble 伪代码：system（人设+档案+recall 证据[+联网搜索结果]）+ 滑窗轮次
@@ -404,7 +414,7 @@ public class MemoryOrchestrator {
             if (guideText.length() <= PROMPT_CHARS) {
                 sb.append("\n").append(guideText);
             } else {
-                sb.append("\n").append(guideText, 0, PROMPT_CHARS);   // take(PROMPT_CHARS)
+                sb.append("\n").append(guideText, 0, PROMPT_CHARS);
                 sb.append("\n……（方案较长已截断，完整内容见页内「方案」按钮；")
                         .append("更多细节可从下方相关记忆中取证）");
             }

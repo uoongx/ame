@@ -155,7 +155,7 @@ static std::string report_ratio(double sum, int count, int precision = 6,
   if (!count) return missing;
   std::ostringstream out;
   out.imbue(std::locale::classic());
-  out << std::fixed << std::setprecision(precision) << sum / count;
+  out << std::fixed << std::setprecision(precision) << (sum / count);
   return out.str();
 }
 

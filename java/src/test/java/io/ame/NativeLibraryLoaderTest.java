@@ -3,9 +3,12 @@ package io.ame;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.logging.Logger;
 
 /** Platform rejection checks; successful Linux JNI loading is covered by AmeEngineSmokeTest. */
 public final class NativeLibraryLoaderTest {
+  private static final Logger LOG = Logger.getLogger(NativeLibraryLoaderTest.class.getName());
+
   private NativeLibraryLoaderTest() {}
 
   public static void main(String[] args) throws Exception {
@@ -44,7 +47,7 @@ public final class NativeLibraryLoaderTest {
       Files.delete(explicitLibrary);
       Files.delete(temporary);
     }
-    System.out.println("AME Linux platform checks passed: 14 rejection cases and 3 x86_64 aliases");
+    LOG.info("AME Linux platform checks passed: 14 rejection cases and 3 x86_64 aliases");
   }
 
   private static void expectPlatformRejection(Path memory, String[] target) {

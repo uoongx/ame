@@ -7,6 +7,7 @@
 
 #include "ame/extractor/dat_trie.h"
 #include "ame/extractor/extractor.h"
+#include "../../../tests/test_temp_dir.hpp"
 
 using namespace ame;
 static double now() {
@@ -87,7 +88,8 @@ int main() {
   // ---- AC 持久化（70 万词）：构建写缓存 vs 加载缓存 ----
   {
     RuleExtractor ext;
-    const char* cache = "/tmp/ame_ac.cache";
+    const ame_test::TempDirectory workspace;
+    const std::string cache = workspace.path("ac.cache");
     double a = now();
     int n = ext.load_keyword_dict_cached(dict, "seg", 700000, cache);
     double b = now();

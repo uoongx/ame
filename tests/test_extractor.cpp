@@ -13,6 +13,7 @@
 #include "ame/extractor/extractor.h"
 #include "ame/time/time_service.h"
 #include "test_util.hpp"
+#include "test_temp_dir.hpp"
 
 using namespace ame;
 
@@ -82,11 +83,10 @@ static void test_extract_multiword_proper() {
 
 static void test_load_keyword_dict() {
   // 运行时加载中文领域词典（小文件模拟 domain/segmentation 格式）
-  FILE* f = std::fopen("/tmp/ame_test_domain.txt", "w");
-  std::fputs("北京烤鸭\t9999\tfood\n糖葫芦\t8888\tfood\n不起眼的词\t1\tfood\n", f);
-  std::fclose(f);
+  const std::string path = ame_test::temp_path("domain.txt");
+  ame_test::write_text_file(path, "北京烤鸭\t9999\tfood\n糖葫芦\t8888\tfood\n不起眼的词\t1\tfood\n");
   RuleExtractor ext;
-  CHECK(ext.load_keyword_dict("/tmp/ame_test_domain.txt", "food", 100) == 3);
+  CHECK(ext.load_keyword_dict(path, "food", 100) == 3);
   Extraction ex = ext.extract("老张中午吃了北京烤鸭");
   bool hit = false;
   for (auto& k : ex.keywords)
@@ -94,19 +94,18 @@ static void test_load_keyword_dict() {
   CHECK(hit);
   // cap 截断
   RuleExtractor ext2;
-  CHECK(ext2.load_keyword_dict("/tmp/ame_test_domain.txt", "food", 1) == 1);
+  CHECK(ext2.load_keyword_dict(path, "food", 1) == 1);
   // 文件不存在
   RuleExtractor ext3;
-  CHECK(ext3.load_keyword_dict("/tmp/nonexistent.txt", "x", 10) == -1);
+  CHECK(ext3.load_keyword_dict(ame_test::temp_path("nonexistent.txt"), "x", 10) == -1);
 }
 
 static void test_ac_automaton() {
   // AC 多模式/重叠/UTF-8 边界
-  FILE* f = std::fopen("/tmp/ame_test_ac.txt", "w");
-  std::fputs("失眠\t1\n失眠症\t2\n压力\t3\nsleep\t4\n", f);
-  std::fclose(f);
+  const std::string path = ame_test::temp_path("ac.txt");
+  ame_test::write_text_file(path, "失眠\t1\n失眠症\t2\n压力\t3\nsleep\t4\n");
   RuleExtractor ext;
-  CHECK(ext.load_keyword_dict("/tmp/ame_test_ac.txt", "concept", 100) == 4);
+  CHECK(ext.load_keyword_dict(path, "concept", 100) == 4);
   auto hits = ext.ac_match("他最近失眠症状加重，压力也大，can't sleep");
   std::unordered_set<std::string> got;
   for (auto& [pos, w, cat] : hits) got.insert(w);
@@ -124,18 +123,16 @@ static void test_ac_automaton() {
 
 // AC 二进制持久化：往返命中一致 + 校验不匹配自动重建
 static void test_ac_persistence() {
-  FILE* f = std::fopen("/tmp/ame_test_acp.txt", "w");
-  std::fputs("失眠\t1\n失眠症\t2\n压力\t3\n", f);
-  std::fclose(f);
-  std::string cache = "/tmp/ame_test_ac.cache";
-  std::filesystem::remove(cache);
+  const std::string path = ame_test::temp_path("ac_persistence.txt");
+  ame_test::write_text_file(path, "失眠\t1\n失眠症\t2\n压力\t3\n");
+  const std::string cache = ame_test::temp_path("ac_persistence.cache");
   RuleExtractor ext;
   // 首次：cache 不存在 → 构建并覆写
-  CHECK(ext.load_keyword_dict_cached("/tmp/ame_test_acp.txt", "concept", 100, cache) == 3);
+  CHECK(ext.load_keyword_dict_cached(path, "concept", 100, cache) == 3);
   CHECK(std::filesystem::exists(cache));
   // 第二次：直接加载（命中一致）
   RuleExtractor ext2;
-  CHECK(ext2.load_keyword_dict_cached("/tmp/ame_test_acp.txt", "concept", 100, cache) == 3);
+  CHECK(ext2.load_keyword_dict_cached(path, "concept", 100, cache) == 3);
   auto h1 = ext.ac_match("他失眠了，失眠症严重");
   auto h2 = ext2.ac_match("他失眠了，失眠症严重");
   std::unordered_set<std::string> s1, s2;
@@ -143,11 +140,9 @@ static void test_ac_persistence() {
   for (auto& [p, w, c] : h2) s2.insert(w);
   CHECK(s1 == s2 && !s1.empty());
   // 词典变更（mtime/size 变化）→ 校验失败自动重建
-  FILE* f2 = std::fopen("/tmp/ame_test_acp.txt", "a");
-  std::fputs("焦虑\t4\n", f2);
-  std::fclose(f2);
+  ame_test::write_text_file(path, "焦虑\t4\n", std::ios::app);
   RuleExtractor ext3;
-  CHECK(ext3.load_keyword_dict_cached("/tmp/ame_test_acp.txt", "concept", 100, cache) == 4);
+  CHECK(ext3.load_keyword_dict_cached(path, "concept", 100, cache) == 4);
   CHECK(!ext3.ac_match("焦虑").empty());
 }
 
@@ -160,11 +155,10 @@ static void test_dat_trie() {
   auto m2 = d.match("他失眠症犯了");
   CHECK(m2.count("失眠") && m2.count("失眠症"));
   // 与 AC 对拍（同词表同文本）
-  FILE* f = std::fopen("/tmp/ame_test_dat.txt", "w");
-  std::fputs("回家的路\n回家路上\n心理保健\n心理健康\n失眠\n失眠症\n", f);
-  std::fclose(f);
+  const std::string path = ame_test::temp_path("dat.txt");
+  ame_test::write_text_file(path, "回家的路\n回家路上\n心理保健\n心理健康\n失眠\n失眠症\n");
   RuleExtractor ext;
-  ext.load_keyword_dict("/tmp/ame_test_dat.txt", "x", 100);
+  CHECK(ext.load_keyword_dict(path, "x", 100) == 6);
   std::unordered_set<std::string> ac;
   for (auto& [p, w, c] : ext.ac_match("回家路上，心理健康")) ac.insert(w);
   CHECK(ac == d.match("回家路上，心理健康"));
@@ -182,8 +176,9 @@ static void test_extraction_stage_priority() {
   RuleExtractor ext;
   ext.add_place("公园", 0, 0);
   ext.add_keyword("车", "attr");
-  std::ofstream("/tmp/ame_stage_words.txt") << "跑步\n失眠\npressure\n";
-  CHECK(ext.load_keyword_dict("/tmp/ame_stage_words.txt", "concept", 10) == 3);
+  const std::string path = ame_test::temp_path("stage_words.txt");
+  ame_test::write_text_file(path, "跑步\n失眠\npressure\n");
+  CHECK(ext.load_keyword_dict(path, "concept", 10) == 3);
   auto ex = ext.extract("小王和老张昨天在朝阳公园骑自行车跑步，失眠 PRESSURE");
   CHECK(ex.place.name == "朝阳公园");
   CHECK(ex.entities[0].surface == "老张" && ex.entities[1].surface == "小王");
@@ -230,6 +225,7 @@ static void cache_write_string(std::ostream& out, const std::string& value) {
 }
 static void write_cache_fixture(const std::string& path, const CacheTestData& data) {
   std::ofstream out(path, std::ios::binary);
+  if (!out) throw std::runtime_error("Cannot open cache fixture: " + path);
   out.write("AMEAC", 5);
   cache_write(out, uint32_t{1});
   cache_write(out, uint64_t{123});
@@ -251,16 +247,18 @@ static void write_cache_fixture(const std::string& path, const CacheTestData& da
       cache_write(out, edge.second);
     }
   }
+  out.close();
+  if (!out) throw std::runtime_error("Cannot write cache fixture: " + path);
 }
 static void expect_cache_rejected(RuleExtractor& ext, const CacheTestData& data) {
-  const std::string path = "/tmp/ame_bad_structure.cache";
+  const std::string path = ame_test::temp_path("bad_structure.cache");
   const auto before = ext.ac_match("ab b");
   write_cache_fixture(path, data);
   CHECK(!ext.ac_load(path, 123, 456));
   CHECK(ext.ac_match("ab b") == before);
 }
 static void test_ac_cache_structure_validation() {
-  const std::string path = "/tmp/ame_valid_structure.cache";
+  const std::string path = ame_test::temp_path("valid_structure.cache");
   write_cache_fixture(path, CacheTestData{});
   RuleExtractor ext;
   CHECK(ext.ac_load(path, 123, 456));
@@ -287,11 +285,14 @@ static void test_ac_cache_structure_validation() {
 }
 static void patch_cache_count(const std::string& path, std::streamoff offset) {
   std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+  if (!file) throw std::runtime_error("Cannot open cache fixture: " + path);
   file.seekp(offset);
   cache_write(file, std::numeric_limits<uint32_t>::max());
+  file.close();
+  if (!file) throw std::runtime_error("Cannot patch cache fixture: " + path);
 }
 static void test_ac_cache_truncation_and_counts() {
-  const std::string path = "/tmp/ame_bad_payload.cache";
+  const std::string path = ame_test::temp_path("bad_payload.cache");
   CacheTestData data;
   RuleExtractor ext;
   write_cache_fixture(path, data);
@@ -316,20 +317,19 @@ static void test_ac_cache_truncation_and_counts() {
   CHECK(ext.ac_match("ab b") == before);
 }
 static void test_ac_cache_rebuild_replaces_old_state() {
-  const std::string dict = "/tmp/ame_rebuild_dict.txt";
-  const std::string cache = "/tmp/ame_rebuild_dict.cache";
-  std::ofstream(dict) << "oldword\n";
-  std::filesystem::remove(cache);
+  const std::string dict = ame_test::temp_path("rebuild_dict.txt");
+  const std::string cache = ame_test::temp_path("rebuild_dict.cache");
+  ame_test::write_text_file(dict, "oldword\n");
   RuleExtractor ext;
   CHECK(ext.load_keyword_dict_cached(dict, "concept", 10, cache) == 1);
-  std::ofstream(dict) << "replacement\n";
-  std::ofstream(cache, std::ios::binary) << "AMEAC";
+  ame_test::write_text_file(dict, "replacement\n");
+  ame_test::write_text_file(cache, "AMEAC");
   CHECK(ext.load_keyword_dict_cached(dict, "concept", 10, cache) == 1);
   CHECK(ext.ac_match("oldword").empty());
   CHECK(ext.ac_match("replacement").size() == 1);
   CHECK(ext.load_keyword_dict_cached(dict, "concept", 10, cache) == 1);
   CHECK(ext.ac_match("replacement").size() == 1);
-  CHECK(ext.load_keyword_dict_cached("/tmp/ame_missing_dict_98231", "concept", 10, cache) == -1);
+  CHECK(ext.load_keyword_dict_cached(ame_test::temp_path("missing_dict"), "concept", 10, cache) == -1);
   CHECK(ext.ac_match("replacement").size() == 1);
 }
 

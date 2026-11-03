@@ -7,6 +7,7 @@
 
 #include "ame/engine/engine.h"
 #include "test_util.hpp"
+#include "test_temp_dir.hpp"
 
 using namespace ame;
 
@@ -29,8 +30,8 @@ static const Node* find_event_by_text(Engine& e, const std::string& key) {
 }
 
 int main() {
-  std::string dir = "/tmp/ame_test_e2e";
-  std::filesystem::remove_all(dir);
+  const ame_test::TempDirectory workspace;
+  std::string dir = workspace.path("engine");
   Engine e(dir);
 
   // ---------- 1. remember：重名消歧 + 因果链 + NEAR ----------
@@ -87,7 +88,7 @@ int main() {
   for (auto& [uid, sim] : ann) CHECK(uid != ev_insomnia->uid);
 
   // ---------- 6. 快照 save/load 后 recall 结果一致 ----------
-  std::string snap = "/tmp/ame_test_e2e_snapshot.json";
+  std::string snap = workspace.path("snapshot.json");
   CHECK(e.save(snap) == Err::Ok);
   auto before = e.recall(sq, {}, 2, 20, true);
   Engine e2;

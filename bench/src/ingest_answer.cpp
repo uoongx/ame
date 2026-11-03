@@ -25,6 +25,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <locale>
 #include <queue>
 #include <sstream>
 #include <unordered_map>
@@ -836,10 +839,12 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
                      q.id.c_str(), cand_dias.c_str());
       } else {
         std::string sel_dias = apply_selection(sel);
-        std::fprintf(stderr,
-                     "  [llm-rerank] %s: LLM 置顶 %zu/%zu 条 | 榜首内容分 %.3f | 选中: %s | 候选: %s\n",
-                     q.id.c_str(), sel.size(), n, top_content, sel_dias.c_str(),
-                     cand_dias.c_str());
+        std::ostringstream message;
+        message.imbue(std::locale::classic());
+        message << "  [llm-rerank] " << q.id << ": LLM 置顶 " << sel.size() << '/' << n
+                << " 条 | 榜首内容分 " << std::fixed << std::setprecision(3) << top_content
+                << " | 选中: " << sel_dias << " | 候选: " << cand_dias << '\n';
+        std::cerr << message.str();
       }
     } else if (cfg.rerank_mode == "cheap") {
       // 便宜近似 v1：特征逻辑重排（零 LLM 零网络；未配模型/加载失败 → 降级 BM25 原序）。

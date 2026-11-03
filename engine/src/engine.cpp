@@ -195,23 +195,23 @@ bool matches_entities(const Storage& storage, const Node& event,
 }
 
 bool matches_keywords(const Storage& storage, const Node& event,
-                       const std::vector<std::string>& keywords) {
-  if (keywords.empty()) return true;
+                       const std::vector<std::string>& normalized_terms) {
+  if (normalized_terms.empty()) return true;
   for (const auto& [edge, node] : storage.neighbors(event.uid, {RelType::CONTAINS})) {
-    if (std::find(keywords.begin(), keywords.end(), node->name) != keywords.end()) return true;
+    if (std::find(normalized_terms.begin(), normalized_terms.end(), node->name) != normalized_terms.end()) return true;
   }
   return false;
 }
 
 bool matches_lookup(const Storage& storage, const Node& event, const LookupQuery& query,
-                    const std::vector<std::string>& keywords) {
+                    const std::vector<std::string>& normalized_terms) {
   if (query.time_from > 0 && event.ts < query.time_from) return false;
   if (query.time_to > 0 && event.ts > query.time_to) return false;
   if (query.current_only && event.attrs.count("valid_to")) return false;
   if (!matches_entities(storage, event, query.entity_uids)) return false;
   if (!query.place_uid.empty() &&
       !storage.find_edge(event.uid, query.place_uid, RelType::HAPPENED_AT)) return false;
-  return matches_keywords(storage, event, keywords);
+  return matches_keywords(storage, event, normalized_terms);
 }
 
 void order_lookup(std::vector<const Node*>& events, const std::string& order_by) {
@@ -230,11 +230,12 @@ std::vector<const Node*> Engine::lookup(const LookupQuery& q) const {
   std::vector<const Node*> out;
   // A non-positive limit cannot produce results; avoid signed-to-size_t resize overflow.
   if (q.limit <= 0) return out;
-  std::vector<std::string> keywords;
-  keywords.reserve(q.keywords.size());
-  for (const auto& word : q.keywords) keywords.push_back(keyword_.normalize(word));
+  // Lexical query terms used for matching graph labels, not authentication material.
+  std::vector<std::string> normalized_terms;
+  normalized_terms.reserve(q.keywords.size());
+  for (const auto& word : q.keywords) normalized_terms.push_back(keyword_.normalize(word));
   for (auto* event : storage_.nodes_of_kind(NodeKind::Event)) {
-    if (matches_lookup(storage_, *event, q, keywords)) out.push_back(event);
+    if (matches_lookup(storage_, *event, q, normalized_terms)) out.push_back(event);
   }
   order_lookup(out, q.order_by);
   if (out.size() > static_cast<size_t>(q.limit)) out.resize(q.limit);

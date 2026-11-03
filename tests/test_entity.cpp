@@ -153,11 +153,72 @@ static void test_candidate_order_and_score_clamping() {
   CHECK(result.uid == second && result.confidence == 1.0 && !result.pending);
 }
 
+static void test_slots_missing_and_optional_fields() {
+  Storage storage;
+  VectorService vectors(&storage);
+  EntityResolver resolver(storage, vectors);
+  const std::string uid = resolver.register_entity("person", "reader");
+  CHECK(resolver.put_slot(uid, "old", "discarded", 1, "old-event") == Err::Ok);
+  Json record = Json::object();
+  record["slot"] = Json::string("residence");
+  record["value"] = Json::string("city");
+  Json records = Json::array();
+  records.push(record);  // src and both timestamps are optional.
+  record["src"] = Json::number(7);  // Wrong type retains the empty-string fallback.
+  records.push(record);
+  record["src"] = Json::string("source-event");
+  record["valid_from"] = Json::number(100);
+  record["valid_to"] = Json::number(200);
+  records.push(record);
+  records.push(Json::object());
+  records.push(Json::string("not an object"));
+  Json root = Json::object();
+  root[uid] = records;
+  root["ignored"] = Json::number(1);
+  resolver.slots_from_json(root);
+  auto profile = resolver.get_profile(uid);
+  CHECK(profile.slots.size() == 5);
+  if (profile.slots.size() != 5) return;
+  CHECK(profile.slots[0].slot == "residence" && profile.slots[0].value == "city");
+  CHECK(profile.slots[0].source_event.empty());
+  CHECK(profile.slots[0].valid_from == 0 && profile.slots[0].valid_to == 0);
+  CHECK(profile.slots[1].source_event.empty());
+  CHECK(profile.slots[2].source_event == "source-event");
+  CHECK(profile.slots[2].valid_from == 100 && profile.slots[2].valid_to == 200);
+  CHECK(profile.slots[3].slot.empty() && profile.slots[3].source_event.empty());
+  CHECK(profile.slots[4].value.empty() && profile.slots[4].valid_to == 0);
+  CHECK(resolver.get_profile("ignored").slots.empty());
+  resolver.slots_from_json(Json::array());
+  CHECK(resolver.get_profile(uid).slots.empty());
+}
+
+static void test_merge_missing_nodes_and_identifier_priority() {
+  Storage storage;
+  VectorService vectors(&storage);
+  EntityResolver resolver(storage, vectors);
+  auto source = resolver.register_entity("person", "source", {{"phone", "first"}, {"email", "mail"}});
+  auto target = resolver.register_entity("person", "target", {{"phone", "second"}});
+  const std::string before = storage.to_json().dump();
+  CHECK(resolver.merge_entities("missing", target) == Err::NotFound);
+  CHECK(resolver.merge_entities(source, "missing") == Err::NotFound);
+  CHECK(resolver.merge_entities("missing", "also-missing") == Err::NotFound);
+  CHECK(resolver.merge_entities(source, source) == Err::InvalidArg);
+  CHECK(storage.to_json().dump() == before);
+  CHECK(resolver.redirect(source) == source);
+  CHECK(resolver.merge_entities(source, target) == Err::Ok);
+  auto card = resolver.get_entity(target);
+  CHECK(card.identifiers.at("phone") == "second");
+  CHECK(card.identifiers.at("email") == "mail");
+  CHECK(resolver.redirect(source) == target);
+}
+
 int main() {
   test_resolve_three_branches();
   test_merge_split_alias();
   test_slots_profile();
   test_resolution_priority_and_creation();
   test_candidate_order_and_score_clamping();
+  test_slots_missing_and_optional_fields();
+  test_merge_missing_nodes_and_identifier_priority();
   return AME_TEST_REPORT();
 }

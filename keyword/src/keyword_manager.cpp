@@ -32,6 +32,8 @@
 #include <cstring>
 #include <vector>
 
+#include <stdexcept>
+
 namespace ame {
 
 // 受控根主题表：返回静态内置常量列表（约 30 个主题），进程内只初始化一次。
@@ -139,6 +141,17 @@ const Node* KeywordManager::find(const std::string& standard_word) const {
   return storage_.find_by_name(NodeKind::Keyword, standard_word);
 }
 
+// Missing terms are normal; losing an indexed node before mutation is an invariant failure.
+// This follows Storage's pointer lifetime contract, without concurrent mutation safety.
+Node* KeywordManager::find_mutable(const std::string& standard_word) {
+  const Node* found = find(standard_word);
+  if (!found) return nullptr;
+  const std::string uid = found->uid;
+  Node* node = storage_.get_node_mut(uid);
+  if (!node) throw std::logic_error("Indexed keyword node is missing: " + uid);
+  return node;
+}
+
 // get_or_create 伪代码：
 //   步骤1：created 输出参数先置 false；
 //   步骤2：对输入词做别名归一；
@@ -154,16 +167,15 @@ std::string KeywordManager::get_or_create(const std::string& word, const std::st
   std::string std_word = normalize(word);
   if (is_stopword(std_word) || std_word.empty()) return "";
 
-  const Node* exist = find(std_word);
-  if (exist) {
-    Node* m = storage_.get_node_mut(exist->uid);
+  Node* m = find_mutable(std_word);
+  if (m) {
     m->mention_count++;
     // 唤醒：计数达到阈值且有边连接
     if (m->status == 1 && m->mention_count >= 3 &&
         !storage_.neighbors(m->uid).empty()) {
       m->status = 0;
     }
-    return exist->uid;
+    return m->uid;
   }
 
   Node n;
@@ -217,14 +229,14 @@ std::vector<const Node*> KeywordManager::list_keywords(const std::string& catego
 
 // 手动休眠：归一后找到节点则置 status=1，未找到则静默忽略。
 void KeywordManager::sleep_keyword(const std::string& word) {
-  const Node* n = find(normalize(word));
-  if (n) storage_.get_node_mut(n->uid)->status = 1;
+  Node* node = find_mutable(normalize(word));
+  if (node) node->status = 1;
 }
 
 // 手动唤醒：归一后找到节点则置 status=0，未找到则静默忽略。
 void KeywordManager::wake_keyword(const std::string& word) {
-  const Node* n = find(normalize(word));
-  if (n) storage_.get_node_mut(n->uid)->status = 0;
+  Node* node = find_mutable(normalize(word));
+  if (node) node->status = 0;
 }
 
 // 休眠判定：按 uid 取节点，仅当节点存在、为 Keyword 类型且 status==1 时返回 true。

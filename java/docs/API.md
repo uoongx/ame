@@ -51,9 +51,10 @@ public synchronized void close();
 ```java
 import io.ame.AmeEngine;
 import java.nio.file.Path;
+import java.util.logging.Logger;
 
 try (AmeEngine memory = AmeEngine.open(Path.of("data", "memory", "user-123"))) {
-    System.out.println(memory.stats());
+    Logger.getLogger("io.ame.integration").info(memory.stats());
 }
 ```
 

@@ -244,77 +244,98 @@ public final class MiniMaxClient {
      *  会带偏模型使其放弃调用搜索工具（实测复现）。本方法只负责"查内容"，综合
      *  提问与记忆作答是调用方的第二次 M3 调用。 */
     public static String webSearch(String query) {
-        String body;
+        Request request = buildWebSearchRequest(query);
+        return executeWebSearch(request);
+    }
+
+    private static String buildWebSearchBody(String query) {
         try {
-            JSONArray arr = new JSONArray()
+            JSONArray input = new JSONArray()
                     .put(new JSONObject().put("role", "system").put("content",
                             "你是联网搜索助手：必须调用 web_search 工具检索最新信息，"
                                     + "再基于搜索结果简洁作答，回答中注明信息来源，"
                                     + "严格控制在 100 字以内。"))
                     .put(new JSONObject().put("role", "user").put("content", query));
-            body = new JSONObject()
+            return new JSONObject()
                     .put("model", BuildConfig.MINIMAX_MODEL)
-                    .put("input", arr)
+                    .put("input", input)
                     .put("tools", new JSONArray()
                             .put(new JSONObject().put("type", "web_search")))
                     .toString();
         } catch (org.json.JSONException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private static Request buildWebSearchRequest(String query) {
+        String body = buildWebSearchBody(query);
         String base = BuildConfig.MINIMAX_BASE_URL;
         while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
-        Request req = new Request.Builder()
+        return new Request.Builder()
                 .url(base + "/responses")
                 .header("Authorization", "Bearer " + BuildConfig.MINIMAX_API_KEY)
                 .header("Content-Type", "application/json")
                 .post(RequestBody.create(
                         body, MediaType.parse("application/json; charset=utf-8")))
                 .build();
-        try (Response resp = client.newCall(req).execute()) {
-            String text = resp.body() != null ? resp.body().string() : "";
-            if (!resp.isSuccessful()) {
+    }
+
+    private static String executeWebSearch(Request request) {
+        try (Response response = client.newCall(request).execute()) {
+            String text = response.body() != null ? response.body().string() : "";
+            if (!response.isSuccessful()) {
                 String snippet = text.length() > 300 ? text.substring(0, 300) : text;
-                Log.e(TAG, "webSearch HTTP " + resp.code() + ": " + snippet);
-                throw new RuntimeException("webSearch HTTP " + resp.code());
+                Log.e(TAG, "webSearch HTTP " + response.code() + ": " + snippet);
+                throw new RuntimeException("webSearch HTTP " + response.code());
             }
-            JSONObject jo;
-            try {
-                jo = new JSONObject(text);
-            } catch (org.json.JSONException e) {
-                throw new RuntimeException(e);
-            }
-            // 首选顶层 output_text；缺失时从 output 数组拼 message 文本兜底
-            String out = jo.optString("output_text", "");
-            if (out.isEmpty()) {
-                StringBuilder sb = new StringBuilder();
-                try {
-                    JSONArray outputs = jo.optJSONArray("output");
-                    if (outputs != null) {
-                        for (int i = 0; i < outputs.length(); i++) {
-                            JSONObject item = outputs.getJSONObject(i);
-                            if (!"message".equals(item.optString("type"))) continue;
-                            JSONArray contents = item.optJSONArray("content");
-                            if (contents == null) continue;
-                            for (int j = 0; j < contents.length(); j++) {
-                                String t = contents.getJSONObject(j).optString("text", "");
-                                if (!t.isEmpty()) {
-                                    if (sb.length() > 0) sb.append('\n');
-                                    sb.append(t);
-                                }
-                            }
-                        }
-                    }
-                } catch (org.json.JSONException ignored) {
-                    // 兜底解析失败走下方统一报错
-                }
-                out = sb.toString();
-            }
-            if (out.isEmpty()) throw new RuntimeException("webSearch 响应无 output_text");
-            Log.d(TAG, "webSearch 200: model=" + BuildConfig.MINIMAX_MODEL
-                    + " 结果" + out.length() + "字");
-            return stripFunctionCalls(stripThink(out));
+            return parseWebSearchResponse(text);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    /** 纯响应解析入口：保留 output_text 优先级，以及原有空结果/JSON 错误语义。 */
+    static String parseWebSearchResponse(String text) {
+        JSONObject response;
+        try {
+            response = new JSONObject(text);
+        } catch (org.json.JSONException e) {
+            throw new RuntimeException(e);
+        }
+        String output = response.optString("output_text", "");
+        if (output.isEmpty()) output = webSearchFallbackText(response.optJSONArray("output"));
+        if (output.isEmpty()) throw new RuntimeException("webSearch 响应无 output_text");
+        Log.d(TAG, "webSearch 200: model=" + BuildConfig.MINIMAX_MODEL
+                + " 结果" + output.length() + "字");
+        return stripFunctionCalls(stripThink(output));
+    }
+
+    private static String webSearchFallbackText(JSONArray outputs) {
+        StringBuilder text = new StringBuilder();
+        if (outputs == null) return text.toString();
+        try {
+            for (int i = 0; i < outputs.length(); i++) {
+                appendWebSearchMessage(outputs.getJSONObject(i), text);
+            }
+        } catch (org.json.JSONException ignored) {
+            // 一处结构错误即终止后续遍历；已追加文本仍保留，由调用方统一检查空结果。
+        }
+        return text.toString();
+    }
+
+    private static void appendWebSearchMessage(JSONObject message, StringBuilder text)
+            throws org.json.JSONException {
+        if (!"message".equals(message.optString("type"))) return;
+        JSONArray contents = message.optJSONArray("content");
+        if (contents == null) return;
+        for (int i = 0; i < contents.length(); i++) {
+            appendWebSearchText(contents.getJSONObject(i).optString("text", ""), text);
+        }
+    }
+
+    private static void appendWebSearchText(String value, StringBuilder text) {
+        if (value.isEmpty()) return;
+        if (text.length() > 0) text.append('\n');
+        text.append(value);
     }
 }

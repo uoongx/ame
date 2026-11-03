@@ -23,7 +23,6 @@ import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -113,7 +112,8 @@ public class GuideActivity extends AppCompatActivity {
             try {
                 guideText = new String(Files.readAllBytes(guideFile.toPath()),
                         StandardCharsets.UTF_8);
-            } catch (IOException ignored) {
+            } catch (IOException error) {
+                Log.w(MemoryOrchestrator.TAG, "读取导览方案失败，按普通对话模式运行", error);
             }
         }
         if (guideText == null) {
@@ -234,20 +234,21 @@ public class GuideActivity extends AppCompatActivity {
             try {
                 guide = new String(Files.readAllBytes(guideFile.toPath()),
                         StandardCharsets.UTF_8);
-            } catch (IOException ignored) {
+            } catch (IOException error) {
+                Log.w(MemoryOrchestrator.TAG, "读取方案文本失败，继续展示可用图片", error);
             }
         }
         TextView tv = new TextView(this);
-        tv.setText(guide != null ? guide : "（无方案文本）");   // ?.readText() ?: 等价
+        tv.setText(guide != null ? guide : "（无方案文本）");
         tv.setTextSize(14f);
         col.addView(tv, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         List<File> plan = planImages();
-        int limit = Math.min(PLAN_DIALOG_MAX_IMGS, plan.size());   // take(n) 等价
+        int limit = Math.min(PLAN_DIALOG_MAX_IMGS, plan.size());
         for (int i = 0; i < limit; i++) {
             File f = plan.get(i);
             ImageView iv = new ImageView(this);
-            iv.setImageBitmap(BitmapFactory.decodeFile(f.getAbsolutePath()));
+            iv.setImageBitmap(decodePlanImage(f));
             iv.setAdjustViewBounds(true);
             col.addView(iv, new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
@@ -260,18 +261,26 @@ public class GuideActivity extends AppCompatActivity {
                 .show();
     }
 
+    private static Bitmap decodePlanImage(File image) {
+        try {
+            return BitmapFactory.decodeFile(image.getCanonicalPath());
+        } catch (IOException error) {
+            Log.w(MemoryOrchestrator.TAG, "读取方案图片失败，继续展示其他内容", error);
+            return null;
+        }
+    }
+
     /** 方案图片：优先 PDF 内嵌图目录，其次页渲染图目录 */
     private List<File> planImages() {
         File imgs = new File(sessionDir, "guide_img");
         File pages = new File(sessionDir, "guide_page");
-        // listFiles { extension == "jpg" }?.isNotEmpty() == true 等价
         File[] imgJpg = imgs.listFiles((dir, name) -> name.endsWith(".jpg"));
         boolean hasEmbedded = imgJpg != null && imgJpg.length > 0;
         File from = hasEmbedded ? imgs : pages;
         File[] jpg = from.listFiles((dir, name) -> name.endsWith(".jpg"));
-        if (jpg == null) return new ArrayList<>();   // ?: emptyList()
+        if (jpg == null) return new ArrayList<>();
         List<File> out = new ArrayList<>(Arrays.asList(jpg));
-        out.sort(Comparator.comparing(f -> f.getName()));   // sortedBy { name }
+        out.sort(Comparator.comparing(f -> f.getName()));
         return out;
     }
 

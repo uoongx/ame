@@ -5,9 +5,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.logging.Logger;
 
 /** Run explicitly against a real native library; no model/network calls or test dependencies. */
 public final class AmeEngineSmokeTest {
+  private static final Logger LOG = Logger.getLogger(AmeEngineSmokeTest.class.getName());
+
   private AmeEngineSmokeTest() {}
 
   public static void main(String[] args) throws Exception {
@@ -40,7 +43,7 @@ public final class AmeEngineSmokeTest {
       checkJson(reopened.stats(), '{');
     }
     verifyFailureLifecycle(base.resolve("failure-checks-" + UUID.randomUUID()));
-    System.out.println("AME Java/native smoke passed; snapshot directory: " + directory.toAbsolutePath());
+    LOG.info("AME Java/native smoke passed; snapshot directory: " + directory.toAbsolutePath());
   }
 
   private static void verifyFailureLifecycle(Path root) throws Exception {

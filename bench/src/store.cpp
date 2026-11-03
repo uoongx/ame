@@ -26,8 +26,8 @@ std::string evidence_date_prefix(int64_t ts) {
   std::ostringstream out;
   out.imbue(std::locale::classic());
   out << '[' << std::internal << std::setfill('0')
-      << std::setw(4) << static_cast<int64_t>(tm.tm_year) + 1900 << '-'
-      << std::setw(2) << tm.tm_mon + 1 << '-'
+      << std::setw(4) << (static_cast<int64_t>(tm.tm_year) + 1900) << '-'
+      << std::setw(2) << (tm.tm_mon + 1) << '-'
       << std::setw(2) << tm.tm_mday << "] ";
   return out.str();
 }

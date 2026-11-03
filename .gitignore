@@ -1,5 +1,6 @@
 # 构建产物
 build/
+*.exe
 .DS_Store
 # 运行产物与私有配置（API key 绝不入库）
 bench/runs/

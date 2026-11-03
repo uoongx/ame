@@ -76,6 +76,9 @@ class ChildProcess {
  public:
   explicit ChildProcess(pid_t pid) : pid_(pid) {}
   ~ChildProcess() {
+    // Only our unreaped child reaches this path after capture fails (for example,
+    // an oversized response). Terminate and reap it so cleanup cannot leave an
+    // orphan process or wait indefinitely on a blocked stdout writer.
     if (pid_ > 0) { ::kill(pid_, SIGKILL); wait_for(pid_); }
   }
   int wait() { const int code = wait_for(pid_); pid_ = -1; return code; }

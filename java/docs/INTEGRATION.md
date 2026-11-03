@@ -145,6 +145,6 @@ SDK 当前没有可配置后台 flush、WAL、事务、逐条删除、导出迁�
 
 ## 8. 最小接入验收
 
-先运行真实 JAR 的 `SdkQuickStart`，确认中文/emoji 写入、召回和关闭重开均通过；再运行 `PluggableAgentExample` 的 legacy、ame 及初始化失败回退场景。示例模型是明确标注的本地回调，不调用真实 LLM，也不声称验证回答质量。
+先运行真实 JAR 的 `io.ame.examples.SdkQuickStart`，确认中文/emoji 写入、召回和关闭重开均通过；再运行 `io.ame.examples.PluggableAgentExample` 的 legacy、ame 及初始化失败回退场景。示例模型是明确标注的本地回调，不调用真实 LLM，也不声称验证回答质量。
 
 接入目标工程后至少核对：实际 payload 中有预期历史、原上下文保持、每请求模型只调用一次、异常/取消不会触发成功写入、不同可信作用域不互读，以及应用关闭后能重开快照。SDK 的 Linux 验证不替代目标应用、部署镜像、存储与真实模型的集成验收；可运行示例的验证环境与范围见 [示例记录](../examples/README.md)。

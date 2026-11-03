@@ -6,6 +6,7 @@
 #include <cmath>
 #include <charconv>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -30,7 +31,9 @@ struct JavaError : std::runtime_error {
   const char* type;
   JavaError(const char* type, const std::string& message) : std::runtime_error(message), type(type) {}
 };
-struct PendingJavaException {};
+struct PendingJavaException final : std::exception {
+  const char* what() const noexcept override { return "A Java exception is already pending"; }
+};
 
 [[noreturn]] void invalid(const char* message) {
   throw JavaError("java/lang/IllegalArgumentException", message);

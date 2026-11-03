@@ -16,6 +16,7 @@
 #include "ame/engine/engine.h"
 #include "ame/llm/llm.h"
 #include "test_util.hpp"
+#include "test_temp_dir.hpp"
 
 using namespace ame;
 
@@ -221,7 +222,7 @@ static void test_snapshot_with_slots() {
   e.entities().put_slot(alice, "residence", "Seattle", 1700000000, r1.event_id);
   e.entities().put_slot(alice, "residence", "Portland", 1700000000 + 86400, r2.event_id);
 
-  std::string path = "/tmp/ame_test_combined_snapshot.json";
+  std::string path = ame_test::temp_path("combined_snapshot.json");
   CHECK(e.save(path) == Err::Ok);
   Engine e2;
   CHECK(e2.load(path) == Err::Ok);
@@ -293,12 +294,9 @@ static void test_evidence_content_rerank() {
 // M3 别名归一（守卫原样）、M1 词面注册（非称呼变体可提取）、M2 实体建档 +
 // 称呼轮（老X/小X）摄入归并到 canonical 实体（INVOLVES）与 canonical 关键词（CONTAINS）。
 static void test_apply_name_aliases() {
-  const char* path = "/tmp/ame_test_names_zh.json";
-  {
-    std::ofstream f(path);
-    f << "{\"source\":\"names_zh\",\"groups\":["
-      << "{\"canonical\":\"李建国\",\"aliases\":[\"小李\",\"李经理\",\"建国\"]}]}";
-  }
+  const std::string path = ame_test::temp_path("names_zh.json");
+  ame_test::write_text_file(path, "{\"source\":\"names_zh\",\"groups\":["
+      "{\"canonical\":\"李建国\",\"aliases\":[\"小李\",\"李经理\",\"建国\"]}]}");
   Engine e;
   int applied = 0;
   CHECK(apply_name_aliases(e, path, &applied) == Err::Ok);
@@ -335,11 +333,8 @@ static void test_apply_name_aliases() {
   CHECK(apply_name_aliases(e, path, &applied) == Err::Ok);
   CHECK(e.storage().find_all_by_name(NodeKind::Entity, "李建国").size() == 1);
   // 坏文件：缺 groups → ParseError
-  const char* bad = "/tmp/ame_test_names_bad.json";
-  {
-    std::ofstream f(bad);
-    f << "{\"source\":\"names_zh\"}";
-  }
+  const std::string bad = ame_test::temp_path("names_bad.json");
+  ame_test::write_text_file(bad, "{\"source\":\"names_zh\"}");
   CHECK(apply_name_aliases(e, bad, nullptr) == Err::ParseError);
 }
 // 存储抽象（3.0 简化版：仅 graph 后端）：GraphStore 与直接 answer() 逐题一致
@@ -570,11 +565,8 @@ static void test_cheap_rerank() {
                   "Caroline asks what book to read next; did you finish your book?",
                   ts0 + 60, "D2:1", "s2");  // decoy：词面高频
   // 玩具模型：唯 bm25_share 权重 -1（偏好低词面份额 = 句级信号替身）
-  const char* mpath = "/tmp/ame_test_cheap_model.json";
-  {
-    std::ofstream f(mpath);
-    f << "{\"features\":[\"bm25_share\"],\"weights\":[-1.0],\"bias\":0.0}";
-  }
+  const std::string mpath = ame_test::temp_path("cheap_model.json");
+  ame_test::write_text_file(mpath, "{\"features\":[\"bm25_share\"],\"weights\":[-1.0],\"bias\":0.0}");
   BenchQuestion q;
   q.id = "q-cheap-1";
   q.question = "What book was recommended to Melanie?";
@@ -591,7 +583,7 @@ static void test_cheap_rerank() {
   // 组2：模型路径不存在 → 加载失败优雅降级 BM25 原序（decoy 居首）
   {
     BenchConfig cfg2 = cfg;
-    cfg2.cheap_rerank_path = "/tmp/ame_test_no_such_model.json";
+    cfg2.cheap_rerank_path = ame_test::temp_path("no_such_model.json");
     auto r = answer(e, q, cfg2);
     const Node* front = e.storage().get_node(r.evidence_uids.front());
     CHECK(front && front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D2:1");

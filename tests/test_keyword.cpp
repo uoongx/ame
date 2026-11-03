@@ -65,10 +65,45 @@ static void test_alias_of_and_guard() {
   CHECK(kw.alias_of("失眠").empty());
 }
 
+static void test_missing_keyword_updates_and_recreation() {
+  Storage storage;
+  KeywordManager manager(storage);
+  manager.sleep_keyword("missing");
+  manager.wake_keyword("missing");
+  CHECK(storage.node_count() == 0);
+  bool created = false;
+  const std::string uid = manager.get_or_create("known", "concept", &created);
+  CHECK(created && !uid.empty());
+  CHECK(manager.get_or_create("KNOWN", "attr", &created) == uid && !created);
+  const Node* node = storage.get_node(uid);
+  CHECK(node && node->mention_count == 2 && node->status == 1 && node->type == "concept");
+  Node event;
+  event.uid = "event";
+  event.kind = NodeKind::Event;
+  storage.put_node(event);
+  storage.put_edge(Edge{event.uid, uid, RelType::CONTAINS, 1.0, {}});
+  CHECK(manager.get_or_create("known", "concept", &created) == uid && !created);
+  CHECK(!manager.is_dormant(uid));
+  manager.add_alias("alias", "known");
+  manager.sleep_keyword("alias");
+  CHECK(manager.is_dormant(uid));
+  manager.wake_keyword("alias");
+  CHECK(!manager.is_dormant(uid));
+  CHECK(storage.from_json(Json::object()) == Err::Ok);
+  manager.sleep_keyword("known");
+  manager.wake_keyword("known");
+  CHECK(storage.node_count() == 0 && !manager.is_dormant(uid));
+  const std::string recreated = manager.get_or_create("known", "topic", &created);
+  CHECK(created && recreated != uid && storage.node_count() == 1);
+  node = storage.get_node(recreated);
+  CHECK(node && node->mention_count == 1 && node->status == 1 && node->type == "topic");
+}
+
 int main() {
   test_normalize_and_stopword();
   test_dormancy();
   test_link_related();
   test_alias_of_and_guard();
+  test_missing_keyword_updates_and_recreation();
   return AME_TEST_REPORT();
 }

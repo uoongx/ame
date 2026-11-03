@@ -63,6 +63,10 @@ class GraphWriter {
   void link_next(const std::string& event_uid);
   void auto_grow(const Node& ev, const std::vector<std::string>& entity_uids,
                  const std::vector<std::string>& kw_uids, const std::string& place_uid);
+  void annotate_event(const Node& event, const std::vector<std::string>& entity_uids,
+                       const std::string& place_uid);
+  void supersede_event(const Node& event, const std::string& previous_uid,
+                        const std::string& slot, const std::string& entity_uid);
   // 知识更新：同实体同槽位词的旧事件标 valid_to 并连 SUPERSEDES 边
   void supersede_pass(const Node& ev, const std::vector<std::string>& entity_uids,
                       const std::vector<std::string>& kw_uids);

@@ -132,7 +132,7 @@ public final class GuidePdf {
                 PdfRenderer.Page page = renderer.openPage(i);
                 float scale = 1024f / page.getWidth();
                 Bitmap bmp = Bitmap.createBitmap(
-                        Math.max(1, (int) (page.getWidth() * scale)),    // coerceAtLeast(1)
+                        Math.max(1, (int) (page.getWidth() * scale)),
                         Math.max(1, (int) (page.getHeight() * scale)),
                         Bitmap.Config.ARGB_8888);
                 bmp.eraseColor(Color.WHITE);

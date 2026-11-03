@@ -1,3 +1,5 @@
+package io.ame.examples;
+
 import io.ame.AmeEngine;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
@@ -11,12 +13,16 @@ import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * A synchronous application example, not an SDK framework API. No real model or network is used.
  * Configuration belongs to this example: -Dexample.context=legacy|ame and -Dexample.dataRoot=...
  */
 public final class PluggableAgentExample {
+  private static final Logger LOG = Logger.getLogger(PluggableAgentExample.class.getName());
+
   // Represents an identity already authenticated and authorized by the application.
   // Never derive this namespace from an unverified userId in a request body.
   private static final String TRUSTED_NAMESPACE = "demo-tenant/demo-verified-visitor";
@@ -144,18 +150,20 @@ public final class PluggableAgentExample {
     AtomicInteger calls = new AtomicInteger();
     Model localModel = messages -> {
       int call = calls.incrementAndGet();
-      System.out.println("\n本地模型回调 #" + call + "（无真实 LLM、无网络请求）");
+      LOG.log(Level.INFO, "本地模型回调 #{0}（无真实 LLM、无网络请求）", call);
       for (Message message : messages) {
-        System.out.println(message.role() + ": " + message.text());
+        LOG.log(Level.INFO, "{0}: {1}", new Object[] {message.role(), message.text()});
       }
       return "本地模拟回答：可以在安静的时段参观博物馆，欣赏青铜器展览。";
     };
     try {
       // One engine for one verified identity, reused across both sequential requests.
       Agent agent = new Agent(provider, localModel);
-      System.out.println("回答一：" + agent.answer("我喜欢安静的博物馆，尤其喜欢青铜器。"));
-      System.out.println("回答二：" + agent.answer("我喜欢安静的博物馆吗？请参考历史偏好介绍青铜器展览。"));
-      System.out.println("模型调用次数：" + calls.get());
+      String firstAnswer = agent.answer("我喜欢安静的博物馆，尤其喜欢青铜器。");
+      LOG.log(Level.INFO, "回答一：{0}", firstAnswer);
+      String secondAnswer = agent.answer("我喜欢安静的博物馆吗？请参考历史偏好介绍青铜器展览。");
+      LOG.log(Level.INFO, "回答二：{0}", secondAnswer);
+      LOG.log(Level.INFO, "模型调用次数：{0}", calls.get());
     } finally {
       try {
         provider.close();
@@ -168,7 +176,7 @@ public final class PluggableAgentExample {
 
   private static ContextProvider selectProvider(String mode) {
     if (mode.equals("legacy")) {
-      System.out.println("应用模式：legacy（不打开 AME，不加载 native library）");
+      LOG.info("应用模式：legacy（不打开 AME，不加载 native library）");
       return new LegacyContextProvider();
     }
     Path root = Path.of(System.getProperty("example.dataRoot", "ame-example-data"))
@@ -176,7 +184,7 @@ public final class PluggableAgentExample {
     Path directory = root.resolve(namespaceHash(TRUSTED_NAMESPACE));
     try {
       AmeEngine engine = AmeEngine.open(directory);
-      System.out.println("应用模式：ame，可信身份对应目录：" + directory);
+      LOG.log(Level.INFO, "应用模式：ame，可信身份对应目录：{0}", directory);
       return new AmeContextProvider(engine);
     } catch (UnsatisfiedLinkError unavailableNativeLibrary) {
       // Catch only this documented initialization failure, not Error/LinkageError/Throwable.
@@ -205,6 +213,6 @@ public final class PluggableAgentExample {
   }
 
   private static void warn(String stage, String detail) {
-    System.err.println("[WARN][" + stage + "] " + detail);
+    LOG.log(Level.WARNING, "[{0}] {1}", new Object[] {stage, detail});
   }
 }
