@@ -33,10 +33,6 @@ std::chrono::milliseconds retry_backoff(int attempt, Generator& generator) {
   return std::chrono::milliseconds(jitter(generator));
 }
 
-inline std::chrono::milliseconds retry_backoff(int attempt) {
-  // Each worker owns its generator; randomness is for scheduling, not security.
-  thread_local std::mt19937 generator{retry_seed([] { return std::random_device{}(); })};
-  return retry_backoff(attempt, generator);
-}
+std::chrono::milliseconds retry_backoff(int attempt);
 
 }  // namespace ame::detail

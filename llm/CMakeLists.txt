@@ -1,6 +1,7 @@
 add_library(ame_llm STATIC
   src/client.cpp
   src/curl_transport.cpp
+  src/retry_backoff.cpp
   src/components.cpp
   src/lexicon.cpp
 )
