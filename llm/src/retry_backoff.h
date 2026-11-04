@@ -9,7 +9,8 @@
 
 namespace ame::detail {
 
-inline constexpr int kMaxApiAttempts = 5;
+inline constexpr int kMaxTransientFailures = 5;
+inline constexpr uint32_t kBaseBackoffMs = 1000U;
 
 template <typename Entropy>
 std::mt19937::result_type retry_seed(Entropy entropy) {
@@ -17,9 +18,9 @@ std::mt19937::result_type retry_seed(Entropy entropy) {
     return entropy();
   } catch (const std::exception&) {
     // An unavailable entropy source must not terminate a retrying worker.
-    static std::atomic<uint32_t> sequence{0};
+    static std::atomic<uint32_t> sequence{0U};
     const auto ticks = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
-    return static_cast<uint32_t>(ticks ^ (ticks >> 32)) ^ sequence.fetch_add(1);
+    return static_cast<uint32_t>(ticks ^ (ticks >> 32U)) ^ sequence.fetch_add(1U);
   }
 }
 
@@ -27,9 +28,9 @@ std::mt19937::result_type retry_seed(Entropy entropy) {
 template <typename Generator>
 std::chrono::milliseconds retry_backoff(int attempt, Generator& generator) {
   if (attempt <= 0) return std::chrono::milliseconds::zero();
-  const int exponent = std::min(attempt, kMaxApiAttempts - 1) - 1;
-  const int ceiling_ms = 1000 * (1 << exponent);
-  std::uniform_int_distribution<int> jitter(0, ceiling_ms);
+  const auto exponent = static_cast<unsigned>(std::min(attempt, kMaxTransientFailures - 1) - 1);
+  const uint32_t ceiling_ms = kBaseBackoffMs * (1U << exponent);
+  std::uniform_int_distribution<uint32_t> jitter(0U, ceiling_ms);
   return std::chrono::milliseconds(jitter(generator));
 }
 

@@ -5,7 +5,9 @@
  * fake client 跑通 ingest→answer→judge 夹具级端到端链路。
  * 集成测试（真实 API）默认跳过，设 AME_RUN_LLM_IT=1 才执行。
  */
+#include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -26,6 +28,66 @@
 #include "test_temp_dir.hpp"
 
 using namespace ame;
+
+using Milliseconds = std::chrono::milliseconds;
+
+class VirtualRetryClock {
+ public:
+  explicit VirtualRetryClock(Milliseconds delay = Milliseconds{10}) : delay_(delay) {}
+
+  LlmRetryRuntime runtime() {
+    return {[this] { return now(); },
+            [this](Milliseconds duration) { sleep(duration); },
+            [this](int attempt) { return delay(attempt); }};
+  }
+
+  void advance(Milliseconds duration) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    now_ += duration;
+  }
+
+  std::vector<Milliseconds> waits;
+  std::vector<int> delay_attempts;
+
+ private:
+  LlmRetryRuntime::Clock::time_point now() {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return now_;
+  }
+
+  void sleep(Milliseconds duration) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    waits.push_back(duration);
+    now_ += duration;
+  }
+
+  Milliseconds delay(int attempt) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    delay_attempts.push_back(attempt);
+    return delay_;
+  }
+
+  std::mutex mutex_;
+  LlmRetryRuntime::Clock::time_point now_{};
+  Milliseconds delay_;
+};
+
+static std::string llm_response(const std::string& content, const std::string& finish = "length") {
+  return "{\"choices\":[{\"finish_reason\":" + Json::string(finish).dump() +
+         ",\"message\":{\"content\":" + Json::string(content).dump() + "}}]}";
+}
+
+static int request_token_budget(const std::string& body) {
+  return static_cast<int>(Json::parse(body)["max_tokens"].as_num());
+}
+
+static LlmTransport length_response(std::vector<int>& budgets, const std::string& content = "partial") {
+  return [&budgets, content](const std::string& body, std::string* out) {
+    budgets.push_back(request_token_budget(body));
+    *out = llm_response(content);
+    return 200;
+  };
+}
 
 static void check_retry_window(int attempt, int ceiling_ms) {
   std::mt19937 generator{42};
@@ -55,7 +117,7 @@ static void test_retry_backoff() {
 
 static void test_retry_entropy_failure() {
   int calls = 0;
-  const auto seed = detail::retry_seed([&]() -> std::mt19937::result_type {
+  const auto seed = detail::retry_seed([&calls]() -> std::mt19937::result_type {
     ++calls;
     throw std::runtime_error("Entropy source unavailable");
   });
@@ -66,23 +128,29 @@ static void test_retry_entropy_failure() {
 }
 
 static void test_retry_exhaustion() {
+  VirtualRetryClock clock;
   DeepSeekClient client("https://example.invalid", "k", "m", "");
+  client.set_retry_runtime(clock.runtime());
   const int failures[] = {0, 429, 500, 503, 0};
   int calls = 0;
-  client.set_transport([&](const std::string&, std::string*) {
+  client.set_transport([&calls, &failures](const std::string&, std::string*) {
     const int index = calls++;
     return index < 5 ? failures[index] : 400;
   });
   CHECK(client.chat({{"user", "retry failure"}}, {}).empty());
   CHECK(calls == 5);
   CHECK(client.api_calls() == 5);
+  CHECK(clock.delay_attempts == std::vector<int>({1, 2, 3, 4}));
+  CHECK(clock.waits == std::vector<Milliseconds>(4, Milliseconds{10}));
 }
 
 static void test_chat_batch_retries() {
+  VirtualRetryClock clock;
   DeepSeekClient client("https://example.invalid", "k", "m", "");
+  client.set_retry_runtime(clock.runtime());
   std::mutex mutex;
   std::map<std::string, int> attempts;
-  client.set_transport([&](const std::string& body, std::string* out) {
+  client.set_transport([&mutex, &attempts](const std::string& body, std::string* out) {
     const std::lock_guard<std::mutex> lock(mutex);
     if (++attempts[body] == 1) return 503;
     *out = R"({"choices":[{"message":{"content":"retried"}}]})";
@@ -97,6 +165,8 @@ static void test_chat_batch_retries() {
   for (const auto& entry : attempts) CHECK(entry.second == 2);
   CHECK(client.api_calls() == 16);
   CHECK(client.cache_hits() == 0);
+  CHECK(clock.delay_attempts == std::vector<int>(8, 1));
+  CHECK(clock.waits == std::vector<Milliseconds>(8, Milliseconds{10}));
 }
 
 static void test_client_cache_and_retry() {
@@ -105,7 +175,7 @@ static void test_client_cache_and_retry() {
 
   DeepSeekClient c("https://example.invalid", "test-key-not-real", "m", dir);
   int calls = 0;
-  c.set_transport([&](const std::string& body, std::string* out) -> int {
+  c.set_transport([&calls](const std::string& body, std::string* out) -> int {
     ++calls;
     CHECK(body.find("\"model\":\"m\"") != std::string::npos);
     *out = R"({"choices":[{"message":{"content":"hello"}}]})";
@@ -125,20 +195,24 @@ static void test_client_cache_and_retry() {
   CHECK(files == 1);
 
   // 重试：两次 429 后 200
+  VirtualRetryClock clock;
   DeepSeekClient c2("https://example.invalid", "k", "m", "");
+  c2.set_retry_runtime(clock.runtime());
   int tries = 0;
-  c2.set_transport([&](const std::string&, std::string* out) -> int {
+  c2.set_transport([&tries](const std::string&, std::string* out) -> int {
     if (++tries < 3) return 429;
     *out = R"({"choices":[{"message":{"content":"ok"}}]})";
     return 200;
   });
   CHECK(c2.chat({{"user", "x"}}, {}) == "ok");
   CHECK(tries == 3);
+  CHECK(clock.delay_attempts == std::vector<int>({1, 2}));
+  CHECK(clock.waits == std::vector<Milliseconds>(2, Milliseconds{10}));
 
   // 不可重试错误（400）立即失败
   DeepSeekClient c3("https://example.invalid", "k", "m", "");
   int tries3 = 0;
-  c3.set_transport([&](const std::string&, std::string*) -> int {
+  c3.set_transport([&tries3](const std::string&, std::string*) -> int {
     ++tries3;
     return 400;
   });
@@ -149,7 +223,7 @@ static void test_client_cache_and_retry() {
 static void test_chat_batch() {
   DeepSeekClient c("https://example.invalid", "k", "m", "");
   std::atomic<int> calls{0};
-  c.set_transport([&](const std::string& body, std::string* out) -> int {
+  c.set_transport([&calls](const std::string& body, std::string* out) -> int {
     ++calls;
     // 按问题内容回显，验证结果与请求同序（取 q- 后的数字编号）
     size_t p = body.find("q-");
@@ -167,6 +241,372 @@ static void test_chat_batch() {
   CHECK(resps.size() == 16);
   for (int i = 0; i < 16; ++i)
     CHECK(resps[i] == "ans-" + std::to_string(i));
+}
+
+static void test_token_expansion_cap() {
+  VirtualRetryClock clock;
+  DeepSeekClient client("https://example.invalid", "k", "m", "");
+  client.set_retry_runtime(clock.runtime());
+  std::vector<int> budgets;
+  client.set_transport(length_response(budgets));
+  ChatOptions options;
+  options.max_tokens = 20000;
+  const auto result = client.chat_result({{"user", "capped expansion"}}, options);
+  CHECK(budgets == std::vector<int>({20000, 32768}));
+  CHECK(result.status == ChatStatus::Truncated);
+  CHECK(result.content == "partial");
+  CHECK(client.api_calls() == 2);
+  CHECK(clock.waits.empty());
+  CHECK(clock.delay_attempts.empty());
+}
+
+static void test_default_token_expansion() {
+  VirtualRetryClock clock;
+  DeepSeekClient client("https://example.invalid", "k", "m", "");
+  client.set_retry_runtime(clock.runtime());
+  std::vector<int> budgets;
+  client.set_transport(length_response(budgets));
+  const auto result = client.chat_result({{"user", "default expansion"}}, {});
+  CHECK(budgets == std::vector<int>({1024, 2048, 4096, 8192, 16384, 32768}));
+  CHECK(result.status == ChatStatus::Truncated);
+  CHECK(result.content == "partial");
+  CHECK(client.api_calls() == 6);
+  CHECK(clock.waits.empty());
+}
+
+static void test_expansion_with_transient_failures() {
+  VirtualRetryClock clock;
+  DeepSeekClient client("https://example.invalid", "k", "m", "");
+  client.set_retry_runtime(clock.runtime());
+  std::vector<int> budgets;
+  client.set_transport([&budgets](const std::string& body, std::string* out) {
+    budgets.push_back(request_token_budget(body));
+    if (budgets.size() == 1) return 429;
+    if (budgets.size() == 3) return 503;
+    *out = llm_response("partial");
+    return 200;
+  });
+  const auto result = client.chat_result({{"user", "mixed retry budgets"}}, {});
+  CHECK(budgets == std::vector<int>({1024, 1024, 2048, 2048, 4096, 8192, 16384, 32768}));
+  CHECK(result.status == ChatStatus::Truncated);
+  CHECK(result.content == "partial");
+  CHECK(client.api_calls() == 8);
+  CHECK(clock.delay_attempts == std::vector<int>({1, 2}));
+  CHECK(clock.waits == std::vector<Milliseconds>(2, Milliseconds{10}));
+}
+
+static void test_maximum_expansion_budget() {
+  VirtualRetryClock clock;
+  DeepSeekClient client("https://example.invalid", "k", "m", "");
+  client.set_retry_runtime(clock.runtime());
+  std::vector<int> budgets;
+  client.set_transport([&budgets](const std::string& body, std::string* out) {
+    budgets.push_back(request_token_budget(body));
+    if (budgets.size() <= 4) return 503;
+    *out = llm_response("partial");
+    return 200;
+  });
+  ChatOptions options;
+  options.max_tokens = 1;
+  const auto result = client.chat_result({{"user", "maximum expansion"}}, options);
+  CHECK(budgets.size() == 20);
+  CHECK(std::count(budgets.begin(), budgets.end(), 1) == 5);
+  CHECK(!budgets.empty() && budgets.back() == 32768);
+  CHECK(result.status == ChatStatus::Truncated);
+  CHECK(result.content == "partial");
+  CHECK(client.api_calls() == 20);
+  CHECK(clock.delay_attempts == std::vector<int>({1, 2, 3, 4}));
+}
+
+static void test_transient_budget_preserves_partial() {
+  VirtualRetryClock clock;
+  DeepSeekClient client("https://example.invalid", "k", "m", "");
+  client.set_retry_runtime(clock.runtime());
+  int calls = 0;
+  client.set_transport([&calls](const std::string&, std::string* out) {
+    if (++calls % 2 != 0) return 503;
+    *out = llm_response("part-" + std::to_string(calls / 2));
+    return 200;
+  });
+  const auto result = client.chat_result({{"user", "cumulative failures"}}, {});
+  CHECK(result.status == ChatStatus::Failed);
+  CHECK(result.content == "part-4");
+  CHECK(calls == 9);
+  CHECK(client.api_calls() == 9);
+  CHECK(clock.delay_attempts == std::vector<int>({1, 2, 3, 4}));
+}
+
+static void test_partial_cache_and_json_policy() {
+  const ame_test::TempDirectory cache;
+  VirtualRetryClock clock;
+  DeepSeekClient client("https://example.invalid", "k", "m", cache.root().string());
+  client.set_retry_runtime(clock.runtime());
+  std::vector<int> budgets;
+  const std::string partial = "{\"incomplete\":";
+  client.set_transport(length_response(budgets, partial));
+  ChatOptions options;
+  options.max_tokens = 32768;
+  const std::vector<ChatMessage> messages{{"user", "partial policy"}};
+  const auto text = client.chat_result(messages, options);
+  CHECK(text.status == ChatStatus::Truncated && text.content == partial);
+  CHECK(client.chat(messages, options) == partial);
+  options.json = true;
+  const auto json = client.chat_result(messages, options);
+  CHECK(json.status == ChatStatus::Truncated && json.content == partial);
+  CHECK(client.chat(messages, options).empty());
+  options.allow_partial = true;
+  CHECK(client.chat(messages, options) == partial);
+  CHECK(client.api_calls() == 5);
+  CHECK(client.cache_hits() == 0);
+  CHECK(std::filesystem::is_empty(cache.root()));
+}
+
+static void test_complete_json_cache() {
+  const ame_test::TempDirectory cache;
+  DeepSeekClient client("https://example.invalid", "k", "m", cache.root().string());
+  const std::string content = R"({"ok":true})";
+  int calls = 0;
+  client.set_transport([&calls, &content](const std::string&, std::string* out) {
+    ++calls;
+    *out = llm_response(content, "stop");
+    return 200;
+  });
+  ChatOptions options;
+  options.json = true;
+  const std::vector<ChatMessage> messages{{"user", "complete JSON"}};
+  const auto result = client.chat_result(messages, options);
+  CHECK(result.status == ChatStatus::Complete && result.content == content);
+  CHECK(client.chat(messages, options) == content);
+  CHECK(calls == 1);
+  CHECK(client.api_calls() == 1 && client.cache_hits() == 1);
+}
+
+static void test_partial_survives_empty_truncation() {
+  VirtualRetryClock clock;
+  DeepSeekClient client("https://example.invalid", "k", "m", "");
+  client.set_retry_runtime(clock.runtime());
+  int calls = 0;
+  client.set_transport([&calls](const std::string&, std::string* out) {
+    *out = llm_response(++calls == 1 ? "earlier partial" : "");
+    return 200;
+  });
+  ChatOptions options;
+  options.max_tokens = 16384;
+  const auto result = client.chat_result({{"user", "empty truncation"}}, options);
+  CHECK(result.status == ChatStatus::Truncated && result.content == "earlier partial");
+  CHECK(calls == 2);
+  CHECK(clock.waits.empty());
+}
+
+static void test_unknown_finish_preserves_partial() {
+  const ame_test::TempDirectory cache;
+  VirtualRetryClock clock;
+  DeepSeekClient client("https://example.invalid", "k", "m", cache.root().string());
+  client.set_retry_runtime(clock.runtime());
+  int calls = 0;
+  client.set_transport([&calls](const std::string&, std::string* out) {
+    *out = ++calls == 1 ? llm_response("earlier partial")
+                       : llm_response("unusable response", "content_filter");
+    return 200;
+  });
+  ChatOptions options;
+  options.max_tokens = 20000;
+  const auto result = client.chat_result({{"user", "unknown finish reason"}}, options);
+  CHECK(result.status == ChatStatus::Failed && result.content == "earlier partial");
+  CHECK(calls == 2);
+  CHECK(std::filesystem::is_empty(cache.root()));
+}
+
+static void test_empty_cache_is_miss() {
+  const ame_test::TempDirectory cache;
+  DeepSeekClient client("https://example.invalid", "k", "m", cache.root().string());
+  int calls = 0;
+  client.set_transport([&calls](const std::string&, std::string* out) {
+    ++calls;
+    *out = llm_response("complete", "stop");
+    return 200;
+  });
+  const std::vector<ChatMessage> messages{{"user", "empty cache recovery"}};
+  CHECK(client.chat(messages, {}) == "complete");
+  for (const auto& entry : std::filesystem::directory_iterator(cache.root()))
+    ame_test::write_text_file(entry.path().string(), "");
+  const auto result = client.chat_result(messages, {});
+  CHECK(result.status == ChatStatus::Complete && result.content == "complete");
+  CHECK(calls == 2 && client.cache_hits() == 0);
+}
+
+static void test_concurrent_complete_cache() {
+  const ame_test::TempDirectory cache;
+  VirtualRetryClock clock;
+  DeepSeekClient client("https://example.invalid", "k", "m", cache.root().string());
+  client.set_retry_runtime(clock.runtime());
+  std::mutex mutex;
+  std::condition_variable both_entered;
+  int calls = 0;
+  const std::string first(65536, 'A');
+  const std::string second(65536, 'B');
+  client.set_transport([&mutex, &both_entered, &calls, &first, &second](const std::string&, std::string* out) {
+    std::unique_lock<std::mutex> lock(mutex);
+    const int index = ++calls;
+    both_entered.notify_all();
+    if (!both_entered.wait_for(lock, std::chrono::seconds{1}, [&calls] { return calls == 2; })) return 400;
+    *out = llm_response(index == 1 ? first : second, "stop");
+    return 200;
+  });
+  const ChatRequest request{{{"user", "same cache key"}}, {}};
+  const auto results = client.chat_batch({request, request}, 2);
+  CHECK(results.size() == 2);
+  for (const auto& result : results) CHECK(result == first || result == second);
+  CHECK(results.size() == 2 && results[0] != results[1]);
+  const auto cached = client.chat_result(request.messages, request.opts);
+  CHECK(cached.status == ChatStatus::Complete);
+  CHECK(cached.content == first || cached.content == second);
+  CHECK(calls == 2 && client.cache_hits() == 1);
+  CHECK(std::distance(std::filesystem::directory_iterator(cache.root()),
+                      std::filesystem::directory_iterator{}) == 1);
+}
+
+static void test_deadline_remaining_time() {
+  VirtualRetryClock clock(Milliseconds{300});
+  DeepSeekClient client("https://example.invalid", "k", "m", "");
+  client.set_retry_runtime(clock.runtime());
+  std::vector<Milliseconds> remaining;
+  client.set_timed_transport([&clock, &remaining](const std::string&, std::string* out,
+                                                Milliseconds budget) {
+    remaining.push_back(budget);
+    clock.advance(Milliseconds{250});
+    if (remaining.size() == 1) return 503;
+    *out = llm_response("complete", "stop");
+    return 200;
+  });
+  ChatOptions options;
+  options.timeout = Milliseconds{1000};
+  const auto result = client.chat_result({{"user", "remaining time"}}, options);
+  CHECK(result.status == ChatStatus::Complete && result.content == "complete");
+  CHECK(remaining == std::vector<Milliseconds>({Milliseconds{1000}, Milliseconds{450}}));
+  CHECK(clock.waits == std::vector<Milliseconds>({Milliseconds{300}}));
+  CHECK(client.api_calls() == 2);
+}
+
+static void test_deadline_caps_retry_wait() {
+  VirtualRetryClock clock(Milliseconds{1000});
+  DeepSeekClient client("https://example.invalid", "k", "m", "");
+  client.set_retry_runtime(clock.runtime());
+  int calls = 0;
+  client.set_transport([&clock, &calls](const std::string&, std::string*) {
+    ++calls;
+    clock.advance(Milliseconds{30});
+    return 503;
+  });
+  ChatOptions options;
+  options.timeout = Milliseconds{100};
+  const auto result = client.chat_result({{"user", "bounded wait"}}, options);
+  CHECK(result.status == ChatStatus::DeadlineExceeded && result.content.empty());
+  CHECK(calls == 1);
+  CHECK(clock.delay_attempts == std::vector<int>({1}));
+  CHECK(clock.waits == std::vector<Milliseconds>({Milliseconds{70}}));
+}
+
+static void test_deadline_expired_before_wait() {
+  VirtualRetryClock clock;
+  DeepSeekClient client("https://example.invalid", "k", "m", "");
+  client.set_retry_runtime(clock.runtime());
+  int calls = 0;
+  client.set_transport([&clock, &calls](const std::string&, std::string*) {
+    ++calls;
+    clock.advance(Milliseconds{100});
+    return 503;
+  });
+  ChatOptions options;
+  options.timeout = Milliseconds{100};
+  const auto result = client.chat_result({{"user", "expired transport"}}, options);
+  CHECK(result.status == ChatStatus::DeadlineExceeded && result.content.empty());
+  CHECK(calls == 1);
+  CHECK(clock.waits.empty());
+  CHECK(clock.delay_attempts.empty());
+}
+
+static void test_deadline_expired_during_delay_sampling() {
+  VirtualRetryClock clock;
+  DeepSeekClient client("https://example.invalid", "k", "m", "");
+  auto runtime = clock.runtime();
+  int delay_calls = 0;
+  runtime.delay = [&clock, &delay_calls](int) {
+    ++delay_calls;
+    clock.advance(Milliseconds{100});
+    return Milliseconds{1000};
+  };
+  client.set_retry_runtime(std::move(runtime));
+  int calls = 0;
+  client.set_transport([&calls](const std::string&, std::string*) { ++calls; return 503; });
+  ChatOptions options;
+  options.timeout = Milliseconds{100};
+  const auto result = client.chat_result({{"user", "expired during delay sampling"}}, options);
+  CHECK(result.status == ChatStatus::DeadlineExceeded && result.content.empty());
+  CHECK(calls == 1 && delay_calls == 1);
+  CHECK(clock.waits.empty());
+}
+
+static void test_deadline_rejects_late_completion() {
+  const ame_test::TempDirectory cache;
+  VirtualRetryClock clock;
+  DeepSeekClient client("https://example.invalid", "k", "m", cache.root().string());
+  client.set_retry_runtime(clock.runtime());
+  std::vector<Milliseconds> remaining;
+  client.set_timed_transport([&clock, &remaining](const std::string&, std::string* out,
+                                                Milliseconds budget) {
+    remaining.push_back(budget);
+    const bool first = remaining.size() == 1;
+    clock.advance(first ? Milliseconds{10} : Milliseconds{90});
+    *out = first ? llm_response("earlier partial") : llm_response("late completion", "stop");
+    return 200;
+  });
+  ChatOptions options;
+  options.max_tokens = 20000;
+  options.timeout = Milliseconds{100};
+  const auto result = client.chat_result({{"user", "late response"}}, options);
+  CHECK(result.status == ChatStatus::DeadlineExceeded);
+  CHECK(result.content == "earlier partial");
+  CHECK(remaining == std::vector<Milliseconds>({Milliseconds{100}, Milliseconds{90}}));
+  CHECK(client.api_calls() == 2);
+  CHECK(clock.waits.empty());
+  CHECK(std::filesystem::is_empty(cache.root()));
+}
+
+static void test_deadline_before_first_transport() {
+  DeepSeekClient client("https://example.invalid", "k", "m", "");
+  int clock_reads = 0;
+  int calls = 0;
+  client.set_retry_runtime({[&clock_reads] {
+                              return LlmRetryRuntime::Clock::time_point{} +
+                                     Milliseconds{100 * clock_reads++};
+                            },
+                            [](Milliseconds) {}, [](int) { return Milliseconds{0}; }});
+  client.set_transport([&calls](const std::string&, std::string*) { ++calls; return 503; });
+  ChatOptions options;
+  options.timeout = Milliseconds{50};
+  const auto result = client.chat_result({{"user", "expired before dispatch"}}, options);
+  CHECK(result.status == ChatStatus::DeadlineExceeded && result.content.empty());
+  CHECK(calls == 0 && client.api_calls() == 0);
+}
+
+static void test_invalid_request_budgets() {
+  DeepSeekClient client("https://example.invalid", "k", "m", "");
+  int calls = 0;
+  client.set_transport([&calls](const std::string&, std::string*) { ++calls; return 400; });
+  ChatOptions options;
+  for (int tokens : {0, -1, 32769, std::numeric_limits<int>::min(), std::numeric_limits<int>::max()}) {
+    options.max_tokens = tokens;
+    const auto result = client.chat_result({{"user", "invalid tokens"}}, options);
+    CHECK(result.status == ChatStatus::Failed && result.content.empty());
+  }
+  options.max_tokens = 1024;
+  for (auto timeout : {Milliseconds{0}, Milliseconds{-1}, Milliseconds::min()}) {
+    options.timeout = timeout;
+    const auto result = client.chat_result({{"user", "invalid timeout"}}, options);
+    CHECK(result.status == ChatStatus::Failed && result.content.empty());
+  }
+  CHECK(calls == 0 && client.api_calls() == 0);
 }
 
 static void test_llm_extractor() {
@@ -575,6 +1015,24 @@ int main() {
   test_client_cache_and_retry();
   test_chat_batch();
   test_chat_batch_retries();
+  test_token_expansion_cap();
+  test_default_token_expansion();
+  test_expansion_with_transient_failures();
+  test_maximum_expansion_budget();
+  test_transient_budget_preserves_partial();
+  test_partial_cache_and_json_policy();
+  test_complete_json_cache();
+  test_partial_survives_empty_truncation();
+  test_unknown_finish_preserves_partial();
+  test_empty_cache_is_miss();
+  test_concurrent_complete_cache();
+  test_deadline_remaining_time();
+  test_deadline_caps_retry_wait();
+  test_deadline_expired_before_wait();
+  test_deadline_expired_during_delay_sampling();
+  test_deadline_rejects_late_completion();
+  test_deadline_before_first_transport();
+  test_invalid_request_budgets();
   test_llm_extractor();
   test_answerer_and_judge();
   test_fake_pipeline_e2e();
