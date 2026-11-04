@@ -5,7 +5,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.huawei.convai</groupId>
   <artifactId>convai-ame-java</artifactId>
-  <version>3.0.0-rc.2</version>
+  <version>3.0.0-rc.3</version>
   <name>AME Java SDK</name>
   <description>Linux x86_64 JNI access to the AME memory engine</description>
   <properties>
