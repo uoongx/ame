@@ -30,7 +30,7 @@ public final class MiniMaxClient {
     private static final String TAG = "AmeMem";
 
     private static final OkHttpClient client = new OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
+            .connectTimeout(3, TimeUnit.SECONDS)
             .readTimeout(180, TimeUnit.SECONDS)
             .build();
 

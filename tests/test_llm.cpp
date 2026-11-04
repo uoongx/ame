@@ -10,17 +10,94 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <map>
+#include <mutex>
 #include <sstream>
+#include <stdexcept>
 
 #include "ame/bench/bench.h"
 #include "ame/core/json.h"
 #include "ame/engine/engine.h"
 #include "ame/llm/components.h"
 #include "ame/llm/llm.h"
+#include "../llm/src/retry_backoff.h"
 #include "test_util.hpp"
 #include "test_temp_dir.hpp"
 
 using namespace ame;
+
+static void check_retry_window(int attempt, int ceiling_ms) {
+  std::mt19937 generator{42};
+  const auto first = detail::retry_backoff(attempt, generator).count();
+  bool varied = false;
+  bool upper_half = false;
+  for (int sample = 0; sample < 64; ++sample) {
+    const auto delay = detail::retry_backoff(attempt, generator).count();
+    CHECK(delay >= 0 && delay <= ceiling_ms);
+    varied = varied || delay != first;
+    upper_half = upper_half || delay > ceiling_ms / 2;
+  }
+  CHECK(varied);
+  CHECK(upper_half);
+}
+
+static void test_retry_backoff() {
+  std::mt19937 generator{42};
+  CHECK(detail::retry_backoff(0, generator).count() == 0);
+  CHECK(detail::retry_backoff(-1, generator).count() == 0);
+  check_retry_window(1, 1000);
+  check_retry_window(2, 2000);
+  check_retry_window(3, 4000);
+  check_retry_window(4, 8000);
+  check_retry_window(std::numeric_limits<int>::max(), 8000);
+}
+
+static void test_retry_entropy_failure() {
+  int calls = 0;
+  const auto seed = detail::retry_seed([&]() -> std::mt19937::result_type {
+    ++calls;
+    throw std::runtime_error("Entropy source unavailable");
+  });
+  std::mt19937 generator{seed};
+  const auto delay = detail::retry_backoff(1, generator).count();
+  CHECK(calls == 1);
+  CHECK(delay >= 0 && delay <= 1000);
+}
+
+static void test_retry_exhaustion() {
+  DeepSeekClient client("https://example.invalid", "k", "m", "");
+  const int failures[] = {0, 429, 500, 503, 0};
+  int calls = 0;
+  client.set_transport([&](const std::string&, std::string*) {
+    const int index = calls++;
+    return index < 5 ? failures[index] : 400;
+  });
+  CHECK(client.chat({{"user", "retry failure"}}, {}).empty());
+  CHECK(calls == 5);
+  CHECK(client.api_calls() == 5);
+}
+
+static void test_chat_batch_retries() {
+  DeepSeekClient client("https://example.invalid", "k", "m", "");
+  std::mutex mutex;
+  std::map<std::string, int> attempts;
+  client.set_transport([&](const std::string& body, std::string* out) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (++attempts[body] == 1) return 503;
+    *out = R"({"choices":[{"message":{"content":"retried"}}]})";
+    return 200;
+  });
+  std::vector<ChatRequest> requests;
+  for (int i = 0; i < 8; ++i) requests.push_back({{{"user", "retry-" + std::to_string(i)}}, {}});
+  const auto results = client.chat_batch(requests, 8);
+  CHECK(results.size() == requests.size());
+  for (const auto& result : results) CHECK(result == "retried");
+  CHECK(attempts.size() == requests.size());
+  for (const auto& entry : attempts) CHECK(entry.second == 2);
+  CHECK(client.api_calls() == 16);
+  CHECK(client.cache_hits() == 0);
+}
 
 static void test_client_cache_and_retry() {
   const ame_test::TempDirectory cache;
@@ -86,6 +163,7 @@ static void test_chat_batch() {
     reqs.push_back({{{"user", "q-" + std::to_string(i)}}, {}});
   auto resps = c.chat_batch(reqs, 8);
   CHECK(calls == 16);
+  CHECK(c.api_calls() == 16);
   CHECK(resps.size() == 16);
   for (int i = 0; i < 16; ++i)
     CHECK(resps[i] == "ans-" + std::to_string(i));
@@ -491,8 +569,12 @@ static void test_extraction_field_defaults() {
 }
 
 int main() {
+  test_retry_backoff();
+  test_retry_entropy_failure();
+  test_retry_exhaustion();
   test_client_cache_and_retry();
   test_chat_batch();
+  test_chat_batch_retries();
   test_llm_extractor();
   test_answerer_and_judge();
   test_fake_pipeline_e2e();

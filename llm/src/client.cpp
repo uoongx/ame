@@ -4,7 +4,7 @@
  *   传输：curl 子进程（请求体与含鉴权的 curl 配置写入临时文件，避免 key 出现在
  *     进程命令行）；HTTP 状态码经 -w 取回；
  *   缓存：请求哈希 → cache_dir/<hash>.txt，命中直接返回（断点续跑零重复扣费）；
- *   重试：429/5xx/传输失败指数退避（1/2/4/8/16s，最多 5 次），其余 4xx 立即失败；
+ *   Retries: full jitter with 1/2/4/8-second ceilings, at most five API attempts.
  *   并发：chat_batch 用固定线程池 + 原子工作索引。
  * 关键算法/数据结构：FNV-1a 64 位哈希做缓存键；临时文件用 mkostemp + CLOEXEC。
  * 依赖关系：依赖 core(json.h) 做响应解析；被 components 与 bench 依赖。
@@ -12,6 +12,7 @@
  */
 #include "ame/llm/llm.h"
 #include "curl_transport.h"
+#include "retry_backoff.h"
 
 #include "ame/core/json.h"
 #include "ame/core/log.h"
@@ -91,19 +92,14 @@ std::string DeepSeekClient::build_body(const std::vector<ChatMessage>& messages,
 
 // extract_content 已由 call_api 内联解析取代（需要同时读 finish_reason/usage）。
 
-// call_api 伪代码（重试策略）：
-//   步骤1：按当前 opts 组装请求体并执行传输，取回 HTTP 状态码与响应体；
-//   步骤2：200 → 解析 content 与 finish_reason；
-//          若 finish_reason==length（输出被截断，含思考烧光预算情形）且 max_tokens
-//          未到上限 32768，则翻倍 max_tokens 立即重试（记日志：finish_reason、
-//          completion_tokens、内容字节数，不打印 key）；
-//   步骤3：429/5xx/传输失败 → 指数退避（1/2/4/8/16 秒）重试，最多 5 次；
-//   步骤4：其余 4xx 立即失败（请求本身有问题，重试无意义）。
+// Retry transport failures, 429, 5xx and truncated responses with full jitter.
+// Truncated responses increase the token budget; other 4xx responses fail immediately.
+// Five total API attempts permit at most four waits with 1/2/4/8-second ceilings.
 std::string DeepSeekClient::call_api(const std::vector<ChatMessage>& messages,
                                      ChatOptions opts) {
-  for (int attempt = 0; attempt < 5; ++attempt) {
+  for (int attempt = 0; attempt < detail::kMaxApiAttempts; ++attempt) {
     if (attempt > 0) {
-      std::this_thread::sleep_for(std::chrono::seconds(1 << (attempt - 1)));
+      std::this_thread::sleep_for(detail::retry_backoff(attempt));
     }
     std::string out;
     int code = transport_(build_body(messages, opts), &out);

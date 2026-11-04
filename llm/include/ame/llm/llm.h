@@ -13,6 +13,7 @@
 #pragma once
 #include "ame/core/types.h"
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
@@ -63,6 +64,11 @@ class DeepSeekClient : public ILlmClient {
   // base_url 形如 https://api.deepseek.com（端点 /chat/completions 在实现内拼接）
   DeepSeekClient(std::string base_url, std::string api_key, std::string model,
                  std::string cache_dir);
+  // The default transport captures this instance; keep its address stable.
+  DeepSeekClient(const DeepSeekClient&) = delete;
+  DeepSeekClient& operator=(const DeepSeekClient&) = delete;
+  DeepSeekClient(DeepSeekClient&&) = delete;
+  DeepSeekClient& operator=(DeepSeekClient&&) = delete;
 
   std::string chat(const std::vector<ChatMessage>& messages,
                    const ChatOptions& opts) override;
@@ -93,8 +99,8 @@ class DeepSeekClient : public ILlmClient {
 
   std::string base_url_, api_key_, model_, cache_dir_;
   LlmTransport transport_;
-  int api_calls_ = 0;
-  int cache_hits_ = 0;
+  std::atomic<int> api_calls_{0};
+  std::atomic<int> cache_hits_{0};
 };
 
 // 测试用假客户端：按注册顺序或规则返回固定响应，记录收到的请求

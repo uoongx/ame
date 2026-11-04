@@ -158,7 +158,7 @@ int curl_transport(const std::string& base_url, const std::string& api_key,
   if (!request.write(body) || !config.write(headers)) return 0;
   // --disable must be first: user curlrc files must not change transport/security options.
   const std::vector<std::string> arguments = {
-      "curl", "--disable", "-sS", "-m", "120", "--proto", "=http,https",
+      "curl", "--disable", "-sS", "-m", "120", "--connect-timeout", "3", "--proto", "=http,https",
       "-K", config.path(), "-X", "POST", "--url", base_url + "/chat/completions",
       "--data-binary", std::string("@") + request.path(), "-w", "\\n%{http_code}"};
   std::string raw;
