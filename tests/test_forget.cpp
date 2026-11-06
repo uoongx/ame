@@ -44,7 +44,9 @@ int main() {
   const auto owner = r1.resolved_entities.front().second;
   CHECK(e.entities().put_slot(owner, "trip", "old", 100, r1.event_id) == Err::Ok);
   CHECK(e.entities().put_slot(owner, "food", "tea", 200, r2.event_id) == Err::Ok);
-  CHECK(e.delete_event(r1.event_id) == Err::Ok);
+  const Node* original = e.storage().get_node(r1.event_id);
+  if (!original) return 1;
+  CHECK(e.delete_event(original->uid) == Err::Ok);
   CHECK(!recall_has(e, "zephyrus", "zephyrus"));
   CHECK(e.storage().get_node(r1.event_id) == nullptr);
   CHECK(e.storage().node_count() == before - 1);

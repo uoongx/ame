@@ -355,8 +355,9 @@ RecallResult Engine::recall_with_tenant(Engine& tenant, const SeedQuery& query,
 }
 
 Err Engine::set_event_blocked(const std::string& uid, bool blocked) {
+  const std::string event_id = uid;
   auto pins = storage_.pin_nodes();
-  const Node* node = storage_.get_node(uid);
+  const Node* node = storage_.get_node(event_id);
   if (!node || node->kind != NodeKind::Event) return Err::NotFound;
   Node updated = *node;
   if (blocked) updated.attrs["blocked"] = "1";
@@ -368,11 +369,12 @@ Err Engine::block_event(const std::string& uid) { return set_event_blocked(uid, 
 Err Engine::unblock_event(const std::string& uid) { return set_event_blocked(uid, false); }
 
 Err Engine::delete_event(const std::string& uid) {
+  const std::string event_id = uid;
   auto pins = storage_.pin_nodes();
-  const Node* node = storage_.get_node(uid);
+  const Node* node = storage_.get_node(event_id);
   if (!node || node->kind != NodeKind::Event) return Err::NotFound;
-  Err result = storage_.delete_node(uid);
-  if (result == Err::Ok) entity_.forget_event_slots(uid);
+  Err result = storage_.delete_node(event_id);
+  if (result == Err::Ok) entity_.forget_event_slots(event_id);
   return result;
 }
 
