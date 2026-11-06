@@ -51,6 +51,8 @@ class GraphWriter {
   // 获取或创建 Place；新 Place 自动挂 IN(Region, geohash 前缀) 与 NEAR(≤500m, ≤10 邻居)
   std::string get_or_create_place(const ExtractedPlace& p, bool* created = nullptr);
 
+  void reset_history() { last_event_uid_.clear(); }
+
  private:
   Node create_event(const Extraction& extraction);
   std::vector<std::string> link_entities(

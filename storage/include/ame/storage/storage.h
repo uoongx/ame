@@ -21,11 +21,14 @@
 #include "ame/core/types.h"
 #include "ame/core/json.h"
 
+#include <memory>
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
 
 namespace ame {
+
+class PgBackend;
 
 // geohash 编码（base32，供 Region 按前缀自动挂载）
 std::string geohash_encode(double lat, double lng, int precision = 6);
@@ -33,6 +36,9 @@ double haversine_m(double lat1, double lng1, double lat2, double lng2);
 
 class Storage {
  public:
+  Storage();
+  ~Storage();
+
   // upsert 节点；uid 为空则报错
   Err put_node(const Node& n);
   // 写入边；同 (from,to,type) 已存在则累加/更新（见 merge_edge）
@@ -41,6 +47,8 @@ class Storage {
   const Edge* find_edge(const std::string& from, const std::string& to, RelType t) const;
   // 更新已存在边的 weight 与 attrs（不存在则新建）
   Err upsert_edge(const Edge& e, bool add_weight);
+
+  Err delete_node(const std::string& uid);
 
   const Node* get_node(const std::string& uid) const;
   Node* get_node_mut(const std::string& uid);
@@ -72,9 +80,27 @@ class Storage {
   const Node* find_by_attr(NodeKind kind, const std::string& key, const std::string& val) const;
 
   std::vector<const Node*> nodes_of_kind(NodeKind k) const;
-  // 返回节点总数（trivial getter）
-  size_t node_count() const { return nodes_.size(); }
+  size_t node_count() const;
   size_t edge_count() const;
+
+  // Hold borrowed PG node pointers across a group of storage calls.
+  class NodePins {
+   public:
+    NodePins(const NodePins&) = delete;
+    NodePins& operator=(const NodePins&) = delete;
+    ~NodePins();
+   private:
+    friend class Storage;
+    explicit NodePins(PgBackend* backend);
+    PgBackend* backend_;
+  };
+  [[nodiscard]] NodePins pin_nodes() const;
+  Err connect_pg(const std::string& conninfo, const std::string& ns);
+  bool pg_active() const;
+  size_t pg_cache_size() const;
+  size_t pg_index_size() const;
+  std::vector<const Node*> lexical_event_candidates(const std::vector<std::string>& words,
+                                                    int limit) const;
 
   // JSON 快照
   Err save(const std::string& path) const;
@@ -92,6 +118,9 @@ class Storage {
   // 名字索引："kind|name" -> 同名节点 uid 列表（put_node/load 时维护，无删除语义）
   std::unordered_map<std::string, std::vector<std::string>> name_index_;
   mutable std::shared_mutex mu_;
+#ifdef AME_WITH_POSTGRES
+  std::unique_ptr<PgBackend> pg_;
+#endif
 };
 
 }  // namespace ame

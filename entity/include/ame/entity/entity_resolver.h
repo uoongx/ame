@@ -106,6 +106,8 @@ class EntityResolver {
   // 槽位持久化：导出/导入 JSON（并入 M12 组合快照，含 valid_to 历史）
   Json slots_to_json() const;
   void slots_from_json(const Json& j);
+  void forget_event_slots(const std::string& event_uid);
+  void clear_memory();
 
   // 旧 uid 跳转（merge 后旧号永不复用）
   std::string redirect(const std::string& uid) const;

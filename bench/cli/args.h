@@ -25,6 +25,8 @@ struct Cli {
   double entity_pass = -1.0;
   double rerank_guard = -1.0;
   std::string cheap_rerank, rerank_mode;
+  std::string pg_conn;
+  std::string pg_ns = "default";
   bool has_final = false;
 };
 
@@ -79,6 +81,8 @@ inline std::unordered_map<std::string, Setter> options(Cli& cli) {
   return {
       {"--dataset", assign(cli.dataset)},
       {"--data", assign(cli.data)},
+      {"--pg-conn", assign(cli.pg_conn)},
+      {"--pg-ns", assign(cli.pg_ns)},
       {"--limit", assign(cli.limit)},
       {"--k", positive(cli.cfg.k)},
       {"--abstain-threshold", assign(cli.cfg.abstain_threshold)},

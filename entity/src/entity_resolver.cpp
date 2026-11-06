@@ -230,6 +230,8 @@ ResolveResult EntityResolver::resolve_candidates(const std::string& surface,
     Node* created = storage_.get_node_mut(rr.uid);
     if (!created) throw std::logic_error("Newly registered entity is missing: " + rr.uid);
     created->attrs["suspected_dup_of"] = best->uid;
+    if (storage_.pg_active() && storage_.put_node(*created) != Err::Ok)
+      throw std::runtime_error("Unable to persist duplicate entity metadata");
   }
   rr.mention_uid = create_mention(surface, rr.uid, rr.confidence);
   return rr;
@@ -303,6 +305,8 @@ Err EntityResolver::merge_entities(const std::string& uid_a, const std::string& 
     if (kv.first.rfind("id:", 0) != 0) continue;
     if (!target->attrs.count(kv.first)) target->attrs[kv.first] = kv.second;
   }
+  if (storage_.pg_active() &&
+      (storage_.put_node(*source) != Err::Ok || storage_.put_node(*target) != Err::Ok)) return Err::IoError;
   for (auto& e : moved) {
     Edge ne = e;
     if (ne.from == a) ne.from = b;
@@ -388,6 +392,22 @@ std::string EntityResolver::slot_as_of(const std::string& uid, const std::string
     if (s.slot == slot && s.valid_from <= as_of && (s.valid_to == 0 || s.valid_to > as_of))
       return s.value;
   return "";
+}
+
+void EntityResolver::forget_event_slots(const std::string& event_uid) {
+  for (auto it = slots_.begin(); it != slots_.end();) {
+    auto& records = it->second;
+    records.erase(std::remove_if(records.begin(), records.end(), [&event_uid](const SlotRecord& r) {
+      return r.source_event == event_uid;
+    }), records.end());
+    if (records.empty()) it = slots_.erase(it);
+    else ++it;
+  }
+}
+
+void EntityResolver::clear_memory() {
+  slots_.clear();
+  redirect_.clear();
 }
 
 // slots_to_json 伪代码：uid → 槽位记录数组（slot/value/valid_from/valid_to/source_event）。

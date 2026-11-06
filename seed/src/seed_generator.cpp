@@ -226,11 +226,30 @@ LexicalScore score_lexical_terms(const Terms& words, const Expansions& expansion
     if (matches(variant)) score.add(variant, source.second * weights.idf.at(variant));
   return score;
 }
+constexpr int kCandidateLimit = 2000;
+enum class LexicalChannel { Ascii, Cjk };
+
+template <typename Terms>
+Events lexical_candidates(Storage& storage, const Terms& terms, KeywordManager& keywords,
+                          LexicalChannel channel) {
+  if (!storage.pg_active()) return storage.nodes_of_kind(NodeKind::Event);
+  std::vector<std::string> words(terms.begin(), terms.end());
+  for (const auto& term : terms) {
+    const auto normalized = keywords.normalize(term);
+    const auto variants = keywords.variants(normalized, channel == LexicalChannel::Ascii ? 3 : 8);
+    words.insert(words.end(), variants.begin(), variants.end());
+    if (channel == LexicalChannel::Ascii) {
+      for (const auto& entry : keywords.near_words(normalized, 3)) words.push_back(entry.first);
+    }
+  }
+  return storage.lexical_event_candidates(words, kCandidateLimit);
+}
+
 void collect_ascii_lexical(const SeedQuery& q, Storage& storage, KeywordManager& kw,
                             SeedSet& seeds) {
   Words content = ascii_content(q.text);
   if (content.empty()) return;
-  auto events = storage.nodes_of_kind(NodeKind::Event);
+  auto events = lexical_candidates(storage, content, kw, LexicalChannel::Ascii);
   Frequencies frequencies;
   auto tokens = tokenize_events(events, content, frequencies);
   Expansions expansions;
@@ -346,7 +365,8 @@ std::vector<std::string> cjk_grams(const std::string& text) {
 void collect_cjk_fallback(const std::string& text, Storage& storage, SeedSet& seeds) {
   auto grams = cjk_grams(text);
   if (grams.empty()) return;
-  auto events = storage.nodes_of_kind(NodeKind::Event);
+  auto events = storage.pg_active() ? storage.lexical_event_candidates(grams, kCandidateLimit)
+                                    : storage.nodes_of_kind(NodeKind::Event);
   Frequencies frequencies;
   for (const auto& gram : grams) frequencies[gram] += substring_frequency(gram, events);
   const Expansions no_expansions;
@@ -366,7 +386,7 @@ void collect_cjk_lexical(const SeedQuery& q, IExtractor* extractor, Storage& sto
     collect_cjk_fallback(q.text, storage, seeds);
     return;
   }
-  auto events = storage.nodes_of_kind(NodeKind::Event);
+  auto events = lexical_candidates(storage, words, kw, LexicalChannel::Cjk);
   collect_cjk_words(q, words, events, kw, seeds);
 }
 }  // namespace

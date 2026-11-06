@@ -42,6 +42,7 @@ void usage() {
   std::fprintf(stderr,
                "Usage: ame_bench --dataset locomo|longmemeval|beam --data <path>\n"
                "      [--extractor rule|llm] [--answer baseline|llm] [--judge f1|llm]\n"
+               "      [--pg-conn CONNINFO --pg-ns BENCHMARK_NAMESPACE]\n"
                "      [--limit N] [--k 10] [--concurrency 8] [--model deepseek-v4-flash]\n"
                "      [--cache-dir bench/cache] [--config bench/config/deepseek.local.json]\n"
                "      [--out report.json] [--abstain-threshold 0.15] [--abstain-categories 5]\n"
@@ -248,6 +249,17 @@ int main(int argc, char** argv) {
       if (!any) continue;
     }
     Engine e;  // 跨 case 隔离：每 case 用完即销毁，避免百级 case 全量图驻留
+    if (!cli.pg_conn.empty()) {
+      // Each benchmark case uses its own disposable namespace.
+      if (e.open_postgres(cli.pg_conn, cli.pg_ns + "." + c.conversation_id) != Err::Ok) {
+        std::fprintf(stderr, "[pg] Unable to open the benchmark namespace; check the PostgreSQL build and service.\n");
+        return 1;
+      }
+      if (e.storage().from_json(Json::object()) != Err::Ok) {
+        std::fprintf(stderr, "[pg] Unable to clear the benchmark namespace.\n");
+        return 1;
+      }
+    }
 
     IngestStats st;
     // --load-graph：整图（含档案槽位）已落盘则直接加载，跳过摄入与 LLM 提取（零调用）

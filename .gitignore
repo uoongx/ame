@@ -18,3 +18,4 @@ build-win/
 *.ac
 __pycache__/
 bench/venv-commercial/
+build-pg/

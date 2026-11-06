@@ -31,6 +31,13 @@
 
 namespace ame {
 
+namespace {
+void persist_node(Storage& storage, const Node& node) {
+  if (storage.pg_active() && storage.put_node(node) != Err::Ok)
+    throw std::runtime_error("Unable to persist node attributes");
+}
+}  // namespace
+
 // 构造：保存 M9 存储、M3 关键词、M10 时间、M13 向量四个依赖的引用
 GraphWriter::GraphWriter(Storage& storage, KeywordManager& kw, TimeService& ts, VectorService& vec)
     : storage_(storage), kw_(kw), ts_(ts), vec_(vec) {}
@@ -160,6 +167,7 @@ void GraphWriter::activate_keyword(const std::string& uid) {
   if (!node) return;
   if (node->status == 1) node->status = 0;
   if (node->embedding.empty()) node->embedding = vec_.embed(node->name + " " + node->type);
+  persist_node(storage_, *node);
 }
 
 std::vector<std::string> GraphWriter::link_keywords(
@@ -179,7 +187,7 @@ std::vector<std::string> GraphWriter::link_keywords(
 }
 
 void GraphWriter::link_next(const std::string& event_uid) {
-  if (!last_event_uid_.empty() && last_event_uid_ != event_uid)
+  if (!last_event_uid_.empty() && last_event_uid_ != event_uid && storage_.get_node(last_event_uid_))
     storage_.put_edge(Edge{last_event_uid_, event_uid, RelType::NEXT, 1.0, {}});
   last_event_uid_ = event_uid;
 }
@@ -220,6 +228,7 @@ void GraphWriter::supersede_event(const Node& event, const std::string& previous
   Node* previous = storage_.get_node_mut(previous_uid);
   if (!previous) throw std::logic_error("Cannot supersede a missing event: " + previous_uid);
   previous->attrs["valid_to"] = std::to_string(event.ts);
+  persist_node(storage_, *previous);
   storage_.put_edge(Edge{event.uid, previous_uid, RelType::SUPERSEDES, 1.0,
                          {{"slot", slot}, {"entity", entity_uid}}});
 }
@@ -313,6 +322,7 @@ void GraphWriter::annotate_event(const Node& event, const std::vector<std::strin
     if (phase.empty()) continue;
     if (stored_event->attrs["phase"].empty()) stored_event->attrs["phase"] = phase;
   }
+  persist_node(storage_, *stored_event);
 }
 
 // 批量导入：预分配结果空间，逐条调用 write_event 落库并收集结果；

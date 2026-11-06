@@ -13,6 +13,7 @@ set(AME_TESTS
   test_diffusion     # M6  能量/路径/休眠隔离/budget
   test_rerank        # M7  融合打分/filters
   test_engine        # M12 网关动词/错误码
+  test_forget        # Event blocking, deletion and reset.
   test_e2e           # 端到端全链路
 )
 
@@ -41,3 +42,10 @@ add_test(NAME test_cli_args COMMAND test_cli_args)
 add_executable(test_curl_transport test_curl_transport.cpp)
 target_link_libraries(test_curl_transport PRIVATE ame_llm)
 add_test(NAME test_curl_transport COMMAND test_curl_transport)
+# PostgreSQL integration tests require a disposable database.
+if(AME_WITH_POSTGRES)
+  add_executable(test_pg_storage test_pg_storage.cpp)
+  target_link_libraries(test_pg_storage PRIVATE ame_engine)
+  add_test(NAME test_pg_storage COMMAND test_pg_storage)
+  set_tests_properties(test_pg_storage PROPERTIES SKIP_RETURN_CODE 77)
+endif()

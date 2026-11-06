@@ -1,0 +1,28 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_PASSWORD: ${AME_PG_TEST_PASSWORD:?Set a disposable test database password}
+      POSTGRES_DB: ame
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ame"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  build:
+    image: debian:bookworm
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${AME_PG_TEST_PASSWORD:?Set a disposable test database password}
+    volumes:
+      - ../..:/src
+    working_dir: /src
+    command: >
+      bash -ec "apt-get update -qq &&
+      apt-get install -y -qq cmake g++ ninja-build libpq-dev postgresql-client &&
+      cmake -S . -B build-pg -G Ninja -DAME_WITH_POSTGRES=ON -DCMAKE_BUILD_TYPE=Release &&
+      cmake --build build-pg &&
+      AME_PG_CONN='host=db dbname=ame user=postgres'
+      ctest --test-dir build-pg --output-on-failure -R ^test_pg_storage$$"
