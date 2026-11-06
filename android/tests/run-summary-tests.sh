@@ -2,7 +2,7 @@
 # Set JSON_JAR to org.json:json:20240303. The test uses the real orchestration with offline fakes.
 set -eu
 : "${JSON_JAR:?Set JSON_JAR to json-20240303.jar}"
-repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+repo=$(unset CDPATH && cd -- "$(dirname -- "$0")/../.." && pwd)
 src="$repo/android/app/src/main/java/com/ame/memory"
 classes=$(mktemp -d "${TMPDIR:-/tmp}/ame-summary-classes.XXXXXX")
 trap 'rm -rf "$classes"' EXIT HUP INT TERM
