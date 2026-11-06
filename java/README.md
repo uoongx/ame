@@ -4,7 +4,7 @@
 
 SDK 通过 JNI 调用 AME C++ 引擎，没有第三方 Java 运行依赖，不绑定 Spring、Agent 框架或模型服务。它是应用依赖库，不是可通过 `java -jar` 启动的服务。Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源也迁入对应路径；调用方须更新 import、反射类名或启动类名并重新编译。
 
-接入其他 Agent 时，使用 [接口参考](docs/API.md)、[通用集成指南](docs/INTEGRATION.md) 和 [可运行示例](examples/README.md)。provider、回退、身份鉴权与调度由应用实现，SDK 提供同步的记忆读写接口。
+4.0 整合分支的 `AmeEngine` 共有 **11 个公共方法**。在 3.0 的 6 个方法基础上，增加了按次租户共享召回、屏蔽、解除屏蔽、删除事件和整库清理。参数、返回值和示例见 [接口参考](docs/API.md)。接入 Agent 时可参阅 [通用集成指南](docs/INTEGRATION.md) 和 [可运行示例](examples/README.md)。
 
 ## 构建与交付
 

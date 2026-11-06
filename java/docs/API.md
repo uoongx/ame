@@ -10,7 +10,7 @@ Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源路径同�
 
 ## 1. 公共方法一览
 
-以下是该类的公共方法；没有公开构造函数或 SDK 自带的结果 DTO。
+**4.0 整合分支的 `AmeEngine` 声明了 11 个公共方法。** `dev-3.0` 的 6 个方法继续可用。4.0 新增 `recallWithTenant`、`blockEvent`、`unblockEvent`、`deleteEvent` 和 `clearMemory`。下方第 2–7 节说明原有方法，第 8–12 节逐项说明新增方法。
 
 ```java
 public static AmeEngine open(java.nio.file.Path directory);
@@ -21,19 +21,18 @@ public synchronized String rememberTurn(
 
 public synchronized String recall(String query, int limit);
 
+public synchronized String stats();
+public synchronized void save();
+public synchronized void close();
+
 public synchronized String recallWithTenant(String query, int limit, AmeEngine tenant);
 public synchronized boolean blockEvent(String eventId);
 public synchronized boolean unblockEvent(String eventId);
 public synchronized boolean deleteEvent(String eventId);
 public synchronized void clearMemory();
-public synchronized String stats();
-
-public synchronized void save();
-
-public synchronized void close();
 ```
 
-`rememberTurn`、`recall`、`stats` 返回 JSON **字符串**，使用应用自己的 JSON 库解析。JSON 对象字段顺序不构成契约；事件和实体 UID 应视为不透明字符串，不应依赖其前缀或生成格式。
+`rememberTurn`、`recall`、`recallWithTenant`、`stats` 返回 JSON **字符串**，使用应用自己的 JSON 库解析。JSON 对象字段顺序不构成契约；事件和实体 UID 应视为不透明字符串，不应依赖其前缀或生成格式。
 
 所有 Java `String` 参数均不可为 `null`。JNI 显式转换 UTF-16 与普通 UTF-8，支持中文、emoji 等 Unicode 字符；不成对的 UTF-16 surrogate 会被拒绝。文本中的 NUL 可保留并在 JSON 中转义为 `\u0000`，目录路径不允许 NUL。
 
@@ -196,10 +195,6 @@ score = 0.5 × graph + 0.3 × context + 0.2 × decay × importance
 
 例如，将上面 53 个 UTF-8 字节的示例文本写入两次，即使使用相同 `messageId`，`turns/events` 都增加 2，`total_chars` 增加 106；`nodes` 的变化依赖实体复用和规则提取，不能由轮数直接推算。
 
-**屏蔽、删除和清空。** 将写入或召回结果中的 `event_id` 传给 `blockEvent`、`unblockEvent` 或 `deleteEvent`。目标事件存在时返回 true，未知 ID 或非事件 ID 返回 false。屏蔽可逆，仅影响召回。删除会移除事件、直接关联的边和来源为该事件的档案槽位。独立写入的摘要、其他事件中的相同文字以及调用方持有的副本有各自的生命周期。`clearMemory()` 清空当前目录对应的整份图和档案，保留配置的词别名。多个业务会话共用目录时会一起清空。上述修改立即作用于当前实例，调用 `save()` 或正常 `close()` 持久化。旧版 SDK 会忽略屏蔽标记。若必须回退，先在新版本删除必须永久隐藏的事件并保存，或由宿主在所有召回路径过滤这些事件。切换前用受隔离的快照副本演练。
-
-**租户共享召回。** 调用 `session.recallWithTenant(query, limit, tenant)`，同时查询两个已打开的独立目录，按事件 ID 去重并按分数合并。传入哪个租户由宿主鉴权决定。本次调用结束即解除关联，后续 `recall()` 仍只查当前实例。关闭任一引擎后调用会抛出 `IllegalStateException`。清理或屏蔽私有库不会修改共享库。
-
 ## 6. `save()`
 
 同步持久化当前实例的全部状态，无参数、无返回值。
@@ -215,31 +210,83 @@ score = 0.5 × graph + 0.3 × context + 0.2 × decay × importance
 同步保存并释放 native 引擎及目录锁。推荐使用 `try-with-resources`。
 
 - 正常关闭会再次执行全量保存，即使之前刚调用过 `save()`，或期间只读没有写入；当前没有 dirty 检查。
-- 关闭后，`rememberTurn`、`recall`、`stats`、`save` 都抛 `IllegalStateException`。
+- 关闭后，使用有效参数调用该实例的读写、查询、清理和保存方法均抛出 `IllegalStateException`。
 - 重复调用 `close()` 不做任何事。
 - **关闭时保存失败，句柄和锁仍会释放，对象仍保持关闭。** 不能用该对象再次 `save()`；未成功持久化的修改可能丢失。调用方必须观察关闭异常。
 - SDK 没有依赖 finalizer/Cleaner 自动关闭实例。仅丢弃 Java 对象引用不会替你保存并释放 native 注册句柄。
 
 `try-with-resources` 在业务代码已经抛异常时，会把关闭异常保留为 suppressed exception；这样可以同时保留原始失败和保存失败。
 
-## 8. 异常契约
+## 8. `recallWithTenant(String query, int limit, AmeEngine tenant)`
 
-公共方法没有声明 checked exception。正常失败使用 Java 异常，而不是错误 JSON、`null` 或一个非零 `code`。下面列出应用应关注的主要类型，异常消息文本不应作为稳定的机器判断接口。
+同时查询当前实例和宿主授权的租户实例，返回与 `recall` 相同的 JSON 数组。两个库的候选事件按 `event_id` 去重、按分数降序合并，最终最多返回 `limit` 条。没有匹配时返回 `[]`。共享范围仅限本次调用，随后调用 `recall()` 只查询当前实例。
+
+`query` 和 `limit` 沿用 `recall` 的约束。两个实例都必须打开。`tenant` 为 `null` 时抛出 `NullPointerException`，传入当前实例自身时抛出 `IllegalArgumentException`，使用已关闭的实例时抛出 `IllegalStateException`。调用方负责根据已认证身份选择租户目录。
+
+```java
+try (AmeEngine visitor = AmeEngine.open(visitorDirectory);
+     AmeEngine tenant = AmeEngine.open(authorizedTenantDirectory)) {
+    String evidence = visitor.recallWithTenant("青铜器展厅在哪里", 5, tenant);
+}
+```
+
+## 9. `blockEvent(String eventId)`
+
+屏蔽当前库中的一条事件。屏蔽立即生效，两种召回方法查询该库时都会跳过它。`stats()` 仍会统计这条事件。
+
+三个条目操作都接受写入或召回结果中的 **`event_id`**。参数为 `null` 时抛出 `NullPointerException`，空字符串抛出 `IllegalArgumentException`。传入未知 ID 或非事件节点 ID 返回 `false`。在写入该事件的实例上调用，修改后用 `save()` 或正常 `close()` 持久化。
+
+```java
+if (memory.blockEvent(eventId)) {
+    memory.save();
+}
+```
+
+事件存在时返回 `true`，重复屏蔽也返回 `true`。3.0 召回会忽略屏蔽标记。若回退后仍须隐藏这些事件，可在新版本删除它们并保存。若要保留原始数据，由宿主过滤旧版召回的事件及相关解释文本；其他事件的 `explain` 也可能引用被屏蔽事件的名称。
+
+## 10. `unblockEvent(String eventId)`
+
+解除当前库中该事件的屏蔽，使其可以再次参与召回。事件存在时返回 `true`，包括它本来就可见的情况。已删除或未知的事件返回 `false`。例如，调用 `memory.unblockEvent(eventId)` 后，下一次查询即可按正常排序召回它。
+
+## 11. `deleteEvent(String eventId)`
+
+删除当前库中的事件、直接关联的边以及以该事件为来源的实体档案槽位。首次成功删除返回 `true`，再次删除同一 ID 返回 `false`。独立写入的摘要、其他库中的事件和调用方已经取得的 JSON 副本保留各自的生命周期。
+
+```java
+if (memory.deleteEvent(eventId)) {
+    memory.save();
+}
+```
+
+## 12. `clearMemory()`
+
+清空当前实例的记忆图和实体档案，保留配置的词别名。无参数，返回 `void`。**清理范围是传给 `open(path)` 的整个目录所对应的库**。多个 `sessionId` 共用这个库时，所有会话一起清空。单独打开的租户共享库有自己的数据。
+
+```java
+memory.clearMemory();
+memory.save();
+```
+
+实例在清空后仍可使用。`save()` 将清空结果写入快照，下次打开同一目录时从空图开始。
+
+## 13. 异常契约
+
+公共方法没有声明 checked exception。召回无匹配时返回 `[]`，三个按 `eventId` 操作的方法找不到目标事件时返回 `false`。参数、生命周期和读写错误通过 Java 异常报告。下面列出主要异常类型，异常消息文本可能随版本变化。
 
 | 类型 | 常见触发条件 |
 |---|---|
-| `NullPointerException` | `directory` 或任一 String 参数为 `null`。 |
-| `IllegalArgumentException` | 空 `text`、空白 `query`、`limit` 越界、时间戳越界、不成对的 UTF-16 surrogate 等。非法 `Path` 构造还可能抛其子类 `InvalidPathException`。 |
+| `NullPointerException` | `directory`、`tenant` 或任一 String 参数为 `null`。 |
+| `IllegalArgumentException` | 空 `text` 或 `eventId`、空白 `query`、`limit` 或时间戳越界、租户与当前实例相同、不成对的 UTF-16 surrogate 等。非法 `Path` 构造还可能抛其子类 `InvalidPathException`。 |
 | `IllegalStateException` | 实例已关闭、native 引擎返回非成功状态或其他原生运行错误。 |
 | `java.io.UncheckedIOException` | `open/save/close` 的 I/O 失败；包括目录不可写、锁冲突、已有快照损坏或不符合当前结构校验、保存/替换失败。底层 `IOException` 保留在 cause 中。 |
 | `UnsatisfiedLinkError` | native 库缺失、路径不合法、系统/架构或依赖不匹配、加载失败、JNI ABI 入口缺失或版本不匹配。它是 `Error`，普通 `catch (Exception)` 捕获不到。 |
 | `OutOfMemoryError` | Java/native 分配失败等。不能把这类错误当作可无条件重试的业务失败。 |
 
-实例方法先检查是否已关闭，再校验参数；同时存在多种无效条件时，不应依赖某一种参数异常一定优先出现。JVM、文件系统安全策略等还可能抛出各自的运行时异常。
+同时存在多种无效条件时，异常的检查顺序取决于方法。JVM、文件系统安全策略等还可能抛出各自的运行时异常。
 
 JSON 数字内部使用 `double`。当前序列化器对绝对值小于 `10^15` 的整数按整数输出，其余按约 9 位有效数字输出；普通现实时间戳可按秒读取，但不要将参数上界理解为任意 `long` 数值都可无损往返的保证。
 
-## 9. 线程、锁与取消
+## 14. 线程、锁与取消
 
 同一引擎的实例方法通过 `synchronized` 串行化；JNI 还有每实例 mutex 与共享句柄生命周期保护。同一实例上读、写、保存、关闭不会并行执行。不同目录的独立实例可以由应用并行调用；SDK 没有应用层的实例缓存或用户路由器。
 
@@ -249,7 +296,7 @@ JSON 数字内部使用 `double`。当前序列化器对绝对值小于 `10^15` 
 
 图中的已有节点和边可以恢复，但加载不会恢复所有运行时状态。例如新实例的写入器不会从快照重建上一条事件的内部链尾，因此不承诺关闭重开后新写入自动接续原实例的 `NEXT` 链。需要连续会话写入时应复用引擎，避免每个请求都打开/关闭。
 
-## 10. Java 版本、native ABI 与平台
+## 15. Java 版本、native ABI 与平台
 
 Java 字节码目标版本是 **17**；AME 的私有 `nativeVersion()` 返回的兼容性版本必须为 **2**，每次 `open()` 都会校验。这里的 ABI 2 不等于 Maven 版本号；底层 `JNI_OnLoad` 使用 JNI 1.8 常量也不代表本 JAR 可运行于 Java 8。不要混用 Android JNI 桥或其他版本的 native 库。
 
