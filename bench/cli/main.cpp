@@ -345,6 +345,7 @@ int main(int argc, char** argv) {
         if (kept > 0) agg_jobs.push_back(std::move(job));
       }
       for (auto& uid : p.base.evidence_uids) {
+        auto pins = e.storage().pin_nodes();
         const Node* n = e.storage().get_node(uid);
         if (n) {
           // 可读日期前缀（epoch 数字 LLM 无法解读，时序题需要真实日期）

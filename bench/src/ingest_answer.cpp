@@ -389,6 +389,7 @@ static std::vector<size_t> llm_rerank_select(ILlmClient& client, const BenchQues
 // 纯实体查询：直查档案槽位当前值。无命中返回空结果，调用方回退 recall 管道。
 static AnswerResult answer_entity_channel(Engine& engine, const BenchQuestion& q,
                                           const BenchConfig& cfg) {
+  auto pins = engine.storage().pin_nodes();
   AnswerResult ar;
   // 步骤1：问题中的大写词对齐已知实体（人名通道）
   std::vector<const Node*> persons;
@@ -666,6 +667,7 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
         // 证据终排（与标准管道同机制）：think 证据并入后按问题内容词 BM25-lite
         // 精确命中重排，防能量/时近偏置盖过词面精确命中（stable，同分保持原序）。
         if (ent.evidence_uids.size() > 1) {
+          auto pins = engine.storage().pin_nodes();
           std::vector<const Node*> nodes;
           std::vector<size_t> ord(ent.evidence_uids.size());
           for (size_t i = 0; i < ord.size(); ++i) {
@@ -727,11 +729,13 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
   std::vector<ScoredEvent> entity_extra;  // 值持有，指针稳定
   for (auto& uid : entity_extra_uids) {
     if (present.count(uid)) continue;  // 与 recall 池重叠 → 去重，不重复占位
+    auto pins = engine.storage().pin_nodes();
     const Node* n = engine.storage().get_node(uid);
     if (!n) continue;
     present.insert(uid);
     ScoredEvent se{};
-    se.event = n;
+    se.retained = std::make_shared<Node>(*n);
+    se.event = se.retained.get();
     entity_extra.push_back(std::move(se));
   }
   for (auto& se : entity_extra) evs.push_back(&se);

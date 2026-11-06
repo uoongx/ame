@@ -308,11 +308,8 @@ RecallResult Engine::recall_local(const SeedQuery& sq, const RecallFilters& filt
   auto diffusion = diffusion_.diffuse(entries, depth);
   Vec embedding = sq.text.empty() ? Vec{} : vector_.embed(sq.text);
   result.events = rerank_.rerank(diffusion, embedding, filters, limit);
-  for (auto& event : result.events) {
-    event.retained = std::make_shared<Node>(*event.event);
-    event.event = event.retained.get();
-    if (!explain) event.explain.clear();
-  }
+  if (!explain)
+    for (auto& event : result.events) event.explain.clear();
   return result;
 }
 

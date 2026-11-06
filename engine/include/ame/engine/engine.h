@@ -117,7 +117,7 @@ class Engine {
   std::string split_entity(const std::string& uid, const std::vector<std::string>& mention_ids);
 
   // ⑦ 实体档案：身份 + 当前/历史槽位 + 时间线（设计文档第八节）
-  EntityProfile get_entity_profile(const std::string& uid) const {
+  EntityProfile get_entity_profile(std::string uid) const {
     auto pins = storage_.pin_nodes();
     return entity_.get_profile(uid);
   }

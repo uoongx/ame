@@ -359,17 +359,12 @@ pgvector HNSW 余弦、邻居索引、词法候选 OR ILIKE），支持较大数
 - 实现与语义差异（**常驻索引 + LRU 有界数据缓存换入换出**（`AME_PG_CACHE_NODES`，
   默认 50000，防内存膨胀）、词法候选池内 df/idf、mut 后必须 put_node）：
   **[storage/pg/README.md](storage/pg/README.md)**。
-- 一键验证：`docker compose -f storage/pg/docker-compose.yml up --abort-on-container-exit build`
+- 在环境中设置临时测试库口令 `AME_PG_TEST_PASSWORD` 后执行 `docker compose -f storage/pg/docker-compose.yml up --abort-on-container-exit --exit-code-from build build`
   （pgvector db + Linux 构建容器，ON 编译 + `test_pg_storage` 对照断言）。
 - bench：`--pg-conn ... [--pg-ns 前缀]`，每 case 独立 ns 并先清库，对照内存管线。
-- **遗忘三级**：条目屏蔽 `block_event/unblock_event`（可逆）、条目删除 `delete_event`
-  （节点+关联边）、session 清空（`clear_memory` / clear_ns），双后端同语义并有测试覆盖；
-  Android 已暴露 `AmeEngine.blockEvent/unblockEvent/deleteEvent/clearSession`，
-  场景验证器 `demo/ame_e2e_forget`（16 步全过）。
-- **租户知识库**：`session.attach_tenant(&tenant)` 后 recall 自动合并租户共享证据
-  （按分融合去重），共同记忆写租户 ns；不同租户共享/私有全部按 ns 隔离，
-  detach 恢复完全私有（`test_pg_storage` 租户用例覆盖）。
-- `get_node_mut` 全部 7 处既有调用点已补 `put_node` 写回（PG 写穿的前提）。
+- 条目屏蔽、恢复和删除支持内存与 PG。 `clear_memory()` 清整份实例或 PG 命名空间，多个会话共用时一起清除。Linux Java SDK 对应 `blockEvent`、`unblockEvent`、`deleteEvent` 和 `clearMemory`，修改后用 `save()` 持久化。Android 提供 `clearSession()`。
+- 共享召回由宿主选择租户。C++ 的 `session.attach_tenant(&tenant)` 建立关联，Linux Java SDK 的 `session.recallWithTenant(query, limit, tenant)` 只对本次查询合并证据。标准 JAR 使用本地快照，PG 是可选的 C++ 构建配置。
+- Android 的三级摘要写入通过 `SUMMARY_MEMORY=true` 启用，接入与测试见 [Android 说明](android/README.md)。
 
 **验证（2026-10-27，Docker pgvector/pg16 + Linux 构建）**：ON 编译 ctest 15/16 绿
 （test_bench 预存 UB 与基线一致，Windows/Linux 均复现），`test_pg_storage` 对真实

@@ -1,5 +1,6 @@
 #include "ame/storage/storage.h"
 #include "ame/core/uid.h"
+#include "ame/bench/bench.h"
 #include "ame/engine/engine.h"
 
 #include <cstdio>
@@ -151,6 +152,26 @@ static void bounded_cache(const std::string& conn, const std::string& prefix) {
   unsetenv("AME_PG_CACHE_NODES");
 }
 
+static void benchmark_small_cache(const std::string& connection, const std::string& prefix) {
+  setenv("AME_PG_CACHE_NODES", "2", 1);
+  Engine engine;
+  CHECK(engine.open_postgres(connection, prefix + "questions") == Err::Ok);
+  unsetenv("AME_PG_CACHE_NODES");
+  if (!engine.storage().pg_active()) return;
+  const auto cases = load_locomo(std::string(AME_FIXTURE_DIR) + "/locomo_mini.json");
+  CHECK(cases.size() == 1);
+  if (cases.size() != 1) return;
+  const auto& fixture = cases.front();
+  CHECK(ingest(engine, fixture).events == 9);
+  size_t answers_with_evidence = 0;
+  for (const auto& question : fixture.questions) {
+    auto result = answer(engine, question, BenchConfig{});
+    if (!result.evidence_uids.empty()) ++answers_with_evidence;
+  }
+  CHECK(answers_with_evidence > 0);
+  CHECK(engine.clear_memory() == Err::Ok);
+}
+
 static void required_write_failure(const std::string& connection, const std::string& prefix) {
   Engine engine;
   CHECK(engine.open_postgres(connection, prefix + "reject") == Err::Ok);
@@ -218,6 +239,7 @@ int main() {
   bounded_cache(connection, prefix);
   shared_graph(connection, prefix);
   required_write_failure(connection, prefix);
+  benchmark_small_cache(connection, prefix);
 
   if (failures == 0) std::printf("PASS test_pg_storage\n");
   return failures == 0 ? 0 : 1;

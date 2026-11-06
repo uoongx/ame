@@ -134,6 +134,8 @@ std::string Reranker::make_explain(const Path& p) const {
 //         取满 limit 即止。
 std::vector<ScoredEvent> Reranker::rerank(const DiffusionResult& diff, const Vec& query_emb,
                                           const RecallFilters& filters, int limit) const {
+  if (limit <= 0) return {};
+  auto pins = storage_.pin_nodes();
   // 归一化图扩散分（仅以事件节点能量为基准）
   double max_energy = 0;
   for (auto& [uid, ne] : diff) {
@@ -171,7 +173,9 @@ std::vector<ScoredEvent> Reranker::rerank(const DiffusionResult& diff, const Vec
   std::unordered_set<std::string> seen_text;
   for (auto& se : out) {
     if (!seen_text.insert(se.event->text).second) continue;
-    picked.push_back(se);
+    se.retained = std::make_shared<Node>(*se.event);
+    se.event = se.retained.get();
+    picked.push_back(std::move(se));
     if ((int)picked.size() >= limit) break;
   }
   return picked;

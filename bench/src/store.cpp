@@ -41,6 +41,7 @@ StoreAnswer GraphStore::answer_question(const BenchQuestion& q, const BenchConfi
   sa.result = answer(*engine_, q, cfg);
   // 证据打包与 CLI graph 路径同一逻辑：日期前缀 + 沿 NEXT 链带前/后一轮上下文
   for (auto& uid : sa.result.evidence_uids) {
+    auto pins = engine_->storage().pin_nodes();
     const Node* n = engine_->storage().get_node(uid);
     if (!n) continue;
     StoreEvidence ev;
