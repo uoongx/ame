@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -197,8 +198,8 @@ void cheap_rerank(const CheapModel& m, const std::string& query,
   evs = std::move(out);
 }
 
+// Every JNI operation holds the registry lock through use of private and tenant nodes.
 ame::Engine* get(jlong h) {
-  std::lock_guard<std::mutex> lk(ame_jni::g_mu());
   auto it = g_engines.find(h);
   return it == g_engines.end() ? nullptr : it->second.get();
 }
@@ -214,6 +215,7 @@ extern "C" {
 JNIEXPORT jlong JNICALL Java_com_ame_memory_AmeEngine_nativeCreateSession(JNIEnv* env,
                                                                           jclass,
                                                                           jstring dir) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   std::string d = ame_jni::j2s(env, dir);
   auto e = std::make_unique<ame::Engine>("");
   if (!d.empty()) {
@@ -230,7 +232,6 @@ JNIEXPORT jlong JNICALL Java_com_ame_memory_AmeEngine_nativeCreateSession(JNIEnv
       LOGI("createSession: no snapshot, starting fresh memory %s", d.c_str());
     }
   }
-  std::lock_guard<std::mutex> lk(ame_jni::g_mu());
   jlong h = ame_jni::g_next()++;
   g_engines[h] = std::move(e);
   return h;
@@ -240,15 +241,12 @@ JNIEXPORT jlong JNICALL Java_com_ame_memory_AmeEngine_nativeCreateSession(JNIEnv
 JNIEXPORT void JNICALL Java_com_ame_memory_AmeEngine_nativeDestroySession(JNIEnv* env,
                                                                           jclass, jlong h,
                                                                           jstring dir) {
-  std::unique_ptr<ame::Engine> e;
-  {
-    std::lock_guard<std::mutex> lk(ame_jni::g_mu());
-    auto it = g_engines.find(h);
-    if (it == g_engines.end()) return;
-    e = std::move(it->second);
-    g_engines.erase(it);
-    g_cheap.erase(h);
-  }
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
+  auto it = g_engines.find(h);
+  if (it == g_engines.end()) return;
+  auto e = std::move(it->second);
+  g_engines.erase(it);
+  g_cheap.erase(h);
   std::string d = ame_jni::j2s(env, dir);
   if (!d.empty()) e->save(snapshot_path(d));
   LOGI("destroySession: final snapshot save %s (turns=%ld)", d.c_str(), e->stats().turns);
@@ -259,6 +257,7 @@ JNIEXPORT void JNICALL Java_com_ame_memory_AmeEngine_nativeDestroySession(JNIEnv
 JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeRememberTurn(
     JNIEnv* env, jclass, jlong h, jstring speaker, jstring text, jlong ts, jstring dia_id,
     jstring session_id) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   auto* e = get(h);
   if (!e) return -1;
   std::string t = ame_jni::j2s(env, text);
@@ -273,6 +272,7 @@ JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeRememberTurn(
 // 之后 nativeRecall 自动走 池60→cheap→topN；解析失败记 ok=false 并回退引擎原序。
 JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeLoadCheapModel(
     JNIEnv* env, jclass, jlong h, jstring model_json) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   auto* e = get(h);
   if (!e) return -1;
   bool ok = false;
@@ -292,7 +292,6 @@ JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeLoadCheapModel(
   LOGI("loadCheapModel: %s (%zu features)", m.ok ? "enabled" : "parse failed, falling back to engine order",
        m.features.size());
   int rc = m.ok ? 1 : 0;
-  std::lock_guard<std::mutex> lk(ame_jni::g_mu());
   g_cheap[h] = std::move(m);
   return rc;
 }
@@ -303,6 +302,7 @@ JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeLoadCheapModel(
 // 内存中的 AC 结构随各 Engine 实例从共享缓存秒开加载。
 JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeLoadKeywordDict(
     JNIEnv* env, jclass, jlong h, jstring dict, jstring cache) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   auto* e = get(h);
   if (!e) return -1;
   int n = e->extractor().load_keyword_dict_cached(ame_jni::j2s(env, dict), "", 10000000,
@@ -318,6 +318,7 @@ JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeLoadKeywordDict(
 JNIEXPORT jstring JNICALL Java_com_ame_memory_AmeEngine_nativeRecall(JNIEnv* env, jclass,
                                                                      jlong h, jstring query,
                                                                      jint limit) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   auto* e = get(h);
   if (!e) return env->NewStringUTF("[]");
   ame::SeedQuery sq;
@@ -325,11 +326,8 @@ JNIEXPORT jstring JNICALL Java_com_ame_memory_AmeEngine_nativeRecall(JNIEnv* env
   sq.lex_topk = 30;
   sq.soft_min_sim = 0.2;
   CheapModel cm;
-  {
-    std::lock_guard<std::mutex> lk(ame_jni::g_mu());
-    auto it = g_cheap.find(h);
-    if (it != g_cheap.end()) cm = it->second;  // 拷贝出锁，recall 不持锁
-  }
+  auto it = g_cheap.find(h);
+  if (it != g_cheap.end()) cm = it->second;
   bool cheap = cm.ok && limit > 0;
   // cheap 档：池放大到 60（与 bench llm/cheap 档候选量一致）→ 特征重排 → 截 limit
   int pool = cheap ? std::max((int)limit, 60) : (limit > 0 ? limit : 5);
@@ -363,6 +361,7 @@ JNIEXPORT jstring JNICALL Java_com_ame_memory_AmeEngine_nativeRecall(JNIEnv* env
 // → JSON {name,slots:[{slot,value,valid_from}]}；无实体返回 "{}"。
 JNIEXPORT jstring JNICALL Java_com_ame_memory_AmeEngine_nativeGetProfile(JNIEnv* env, jclass,
                                                                          jlong h) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   auto* e = get(h);
   if (!e) return env->NewStringUTF("{}");
   const ame::Node* best = nullptr;
@@ -395,6 +394,7 @@ JNIEXPORT jstring JNICALL Java_com_ame_memory_AmeEngine_nativeGetProfile(JNIEnv*
 //（Android 状态栏数据通路：累计记忆轮数/字符数 + 引擎图规模）。
 JNIEXPORT jstring JNICALL Java_com_ame_memory_AmeEngine_nativeStats(JNIEnv* env, jclass,
                                                                     jlong h) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   auto* e = get(h);
   if (!e) return env->NewStringUTF("{}");
   auto s = e->stats();
@@ -408,6 +408,7 @@ JNIEXPORT jstring JNICALL Java_com_ame_memory_AmeEngine_nativeStats(JNIEnv* env,
 // nativeSave/nativeLoad 伪代码：显式快照落盘/恢复到 dir/graph.json，返回 Err 码。
 JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeSave(JNIEnv* env, jclass, jlong h,
                                                                 jstring dir) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   auto* e = get(h);
   if (!e) return -1;
   return (jint)e->save(snapshot_path(ame_jni::j2s(env, dir)));
@@ -415,14 +416,16 @@ JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeSave(JNIEnv* env, jcl
 
 JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeLoad(JNIEnv* env, jclass, jlong h,
                                                                 jstring dir) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   auto* e = get(h);
   if (!e) return -1;
   return (jint)e->load(snapshot_path(ame_jni::j2s(env, dir)));
 }
 
-// ---- 4.0 条目级遗忘 + session 清空（供 App/API 层直接验证两能力）----
+// Event and engine-level memory management.
 JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeBlockEvent(JNIEnv* env, jclass,
                                                                       jlong h, jstring uid) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   auto* e = get(h);
   if (!e) return -1;
   return (jint)e->block_event(ame_jni::j2s(env, uid));
@@ -430,6 +433,7 @@ JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeBlockEvent(JNIEnv* en
 
 JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeUnblockEvent(JNIEnv* env, jclass,
                                                                         jlong h, jstring uid) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   auto* e = get(h);
   if (!e) return -1;
   return (jint)e->unblock_event(ame_jni::j2s(env, uid));
@@ -437,35 +441,41 @@ JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeUnblockEvent(JNIEnv* 
 
 JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeDeleteEvent(JNIEnv* env, jclass,
                                                                        jlong h, jstring uid) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   auto* e = get(h);
   if (!e) return -1;
   return (jint)e->delete_event(ame_jni::j2s(env, uid));
 }
 
-// nativeClearSession：清图+档案（clear_memory）并删除快照文件，session 记忆完全卸载
+// Clear the private graph and discard its saved snapshot.
 JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeClearSession(JNIEnv* env, jclass,
                                                                         jlong h, jstring dir) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   auto* e = get(h);
   if (!e) return -1;
-  e->clear_memory();
-  std::string sp = snapshot_path(ame_jni::j2s(env, dir));
-  std::remove(sp.c_str());
-  LOGI("clearSession: 记忆已清空并删除快照 %s", sp.c_str());
+  const auto result = e->clear_memory();
+  if (result != ame::Err::Ok) return static_cast<jint>(result);
+  const std::string directory = ame_jni::j2s(env, dir);
+  if (!directory.empty()) {
+    std::error_code error;
+    std::filesystem::remove(snapshot_path(directory), error);
+    if (error) return static_cast<jint>(ame::Err::IoError);
+  }
   return 0;
 }
 
-// 租户知识库：tenant 也是 AmeEngine.create 出的独立引擎（独立目录=独立记忆库），
-// attach 后本 session 的 recall 自动合并租户证据（合并/去重见 Engine::recall）
+// Engine validates the relationship and tracks the tenant lifetime.
 JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeAttachTenant(JNIEnv*, jclass,
                                                                         jlong h, jlong tenant) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   auto* e = get(h);
   auto* t = get(tenant);
   if (!e || !t) return -1;
-  e->attach_tenant(t);
-  return 0;
+  return static_cast<jint>(e->attach_tenant(t));
 }
 
 JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeDetachTenant(JNIEnv*, jclass, jlong h) {
+  std::lock_guard<std::mutex> operation(ame_jni::g_mu());
   auto* e = get(h);
   if (!e) return -1;
   e->detach_tenant();

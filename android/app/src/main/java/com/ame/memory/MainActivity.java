@@ -150,10 +150,7 @@ public class MainActivity extends AppCompatActivity {
                         chunks.add(plan.text.substring(i,
                                 Math.min(i + GUIDE_CHUNK_CHARS, plan.text.length())));
                     }
-                    for (int i = 0; i < chunks.size(); i++) {
-                        eng.rememberTurn("guide", chunks.get(i), base + i, "g" + i, s.id);
-                    }
-                    eng.save();
+                    storeGuideChunks(eng, s.id, chunks, base);
                     Log.i(MemoryOrchestrator.TAG, "Guide plan ingested into memory: chunks=" + chunks.size());
                 }
                 runOnUiThread(() -> {
@@ -170,6 +167,15 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
         });
+    }
+
+    private static void storeGuideChunks(AmeEngine engine, String sessionId, List<String> chunks, long base) {
+        MemorySummaryService summaries = new MemorySummaryService(engine, sessionId);
+        for (int i = 0; i < chunks.size(); i++) {
+            int rc = summaries.remember("guide", chunks.get(i), base + i, "g" + i, "");
+            if (rc != 0) throw new IllegalStateException("Unable to store guide memory");
+        }
+        if (engine.save() != 0) throw new IllegalStateException("Unable to save guide memory");
     }
 
     private void refresh() {

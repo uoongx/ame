@@ -155,35 +155,20 @@ prompt 注入前 8000 字，截断外细节靠 recall 命中已灌入的方案�
   token/证据数/联网/重排状态）、证据逐条、System Prompt 全文、Messages 逐条
   角色卡片。召回问题先看这里，比 logcat 直观。
 
-## 11. 遗忘 API（条目屏蔽/删除 + session 清空）
+## 11. 遗忘和租户 API
 
-`AmeEngine`（Java 薄壳 → JNI → `Engine` 动词），返回 0=成功、1=NotFound、-1=引擎无效：
+Android 的 `com.ame.memory.AmeEngine` 通过 `recall()` 返回事件 `uid`。以下操作返回 0 表示成功，-1 表示句柄已关闭或无效，其他错误使用引擎的 `Err` 枚举。
 
-```java
-engine.blockEvent(uid);     // 条目屏蔽：recall 不再返回，数据保留（可逆）
-engine.unblockEvent(uid);   // 解除屏蔽，恢复召回
-engine.deleteEvent(uid);    // 条目删除：节点+全部关联边，不可恢复
-engine.clearSession();      // session 记忆清空：清图+档案并删 graph.json
-```
-
-- uid 即事件 id（`RememberResult.event_id`；recall JSON 每条带 `uid` 字段，
-  可直接从召回证据里取条目做屏蔽/删除）。
-- 屏蔽只影响召回注入，不删除数据，适合"这条别再用"的隐私/纠错场景；
-  删除是物理清除（含 PG 端 `DELETE FROM ... WHERE ns=当前session`）。
-- `clearSession` 后 `close()` 的兜底快照会写入一份空图，属预期；
-  验证器：`demo/ame_e2e_forget`（16 步场景全过，无 LLM，PC 直接运行）。
-
-**session / 租户管理 API 速查**：
-
-| 能力 | 入口 |
+| 操作 | 作用域和持久化 |
 |---|---|
-| 创建 session | `SessionStore.createSession(name, type, pdf)`（MainActivity 新建按钮） |
-| 删除 session | `SessionStore.deleteSession(id)`（递归删目录）或 `AmeEngine.clearSession()`（清引擎+快照） |
-| 创建租户知识库 | `AmeEngine tenant = AmeEngine.create(tenantDir)`（独立目录=独立记忆库） |
-| 挂接/解除租户 | `session.attachTenant(tenant)` / `session.detachTenant()` |
+| `blockEvent(uid)`、`unblockEvent(uid)` | 可逆地屏蔽或恢复当前私有引擎的召回事件。调用 `save()` 或正常关闭后持久化。 |
+| `deleteEvent(uid)` | 删除私有事件及其关联边。保存快照后，重新打开仍然生效。 |
+| `clearSession()` | 清除整个私有引擎的图、档案数据，并移除该目录的 `graph.json`。正常关闭后可生成空图快照。 |
+| `attachTenant(tenant)`、`detachTenant()` | 将一个独立引擎作为当前会话的共享召回来源。业务负责授权和选择正确的租户目录。 |
+| `SessionStore.deleteSession(id)` | 关闭相关引擎后由应用删除整个会话目录，包括消息记录、导游材料、快照。 |
 
-租户共享语义：挂接后 session 的 recall 自动合并租户证据（按分融合去重）；
-不同租户、不同 session 的记忆在各自目录/ns 下完全隔离。
+挂接仅对本次打开的引擎有效，重新打开需重新挂接。关闭租户会使现有挂接失效。挂接拒绝自引用和循环，召回仅合并一层共享记忆。
+清理 AME 私有图不会删除共享库或应用的 `messages.jsonl`、PDF 等文件；历史消息滑窗可以继续引用独立保存的内容。
 
 ## 12. 调参速查
 

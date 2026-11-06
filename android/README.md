@@ -180,3 +180,5 @@ PDF；游客拍照 + 提问，按方案回答，同时保留该游客在本次�
   `guide_page/`（页渲染图）、`graph.json`/`messages.jsonl`（原有）。
 - **session 类型隔离**：`sessions.json` 元数据加 `type`（chat/guide，旧数据默认
   chat）与 `pdf` 字段；两个 tab 各自过滤，列表互不串、记忆互不串。
+
+Android 构建时可在 `local.properties` 设置 `SUMMARY_MEMORY=true`，为每个完成轮次和导入的方案块生成三级摘要。默认关闭生成；已有的摘要仍可用于分层召回。见[摘要服务文档](记忆摘要服务_设计实现与API集成.md)。

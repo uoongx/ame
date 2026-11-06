@@ -37,6 +37,7 @@ android {
         // 装配上限（可调，状态栏同步显示）：滑窗消息条数 + recall 证据条数
         // 滑窗默认 8 条 = 4 轮对话：recall 修复后更早历史靠证据取证，窗口过长浪费 token
         buildConfigField "int", "CONTEXT_WINDOW_TURNS", "${lp.getProperty('CONTEXT_WINDOW_TURNS', '8')}"
+        buildConfigField "boolean", "SUMMARY_MEMORY", lp.getProperty('SUMMARY_MEMORY', 'false').toBoolean().toString()
         buildConfigField "int", "RECALL_TOP_K", "${lp.getProperty('RECALL_TOP_K', '5')}"
         externalNativeBuild {
             cmake {

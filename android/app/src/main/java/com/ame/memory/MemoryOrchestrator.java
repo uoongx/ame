@@ -109,8 +109,8 @@ public class MemoryOrchestrator {
     }
 
     private final ArrayDeque<TurnDiag> diagLog = new ArrayDeque<>();
-    private final FollowupGate gate = new FollowupGate();  // 追问阶段状态机（渐进注入）
-    private final MemorySummaryService summaryService;      // 三级摘要检索（MEMSUM 事件）
+    private final FollowupGate gate = new FollowupGate();
+    private final MemorySummaryService summaryService;
 
     /** 短构造：普通对话模式（窗口/证据数取 BuildConfig 默认值，无导游参数） */
     public MemoryOrchestrator(AmeEngine engine, SessionStore store, String sessionId) {
@@ -238,7 +238,7 @@ public class MemoryOrchestrator {
     /** 整轮记忆、双侧消息依次落盘；每 SAVE_EVERY 个完成轮次保存快照。 */
     private void persistSuccessfulTurn(String memoryText, String reply, String imagePath, long now) {
         String pair = memoryText + "\n→ " + reply;
-        int rc = engine.rememberTurn("user", pair, now, "u" + now, sessionId);
+        int rc = summaryService.remember("user", pair, now, "u" + now, memoryText);
         store.appendMessage(sessionId, new Message("user", memoryText, now, imagePath));
         store.appendMessage(sessionId, new Message("assistant", reply, now + 1, null));
         int rcS = 0;
@@ -274,30 +274,6 @@ public class MemoryOrchestrator {
             List<EvidenceItem> items = recallEvidence(query,
                     deepRerank ? DEEP_RERANK_POOL : recallLimit, windowTexts);
             if (deepRerank) items = deepRerank(query, items);
-            // 渐进式摘要注入（MEMSUM 事件存在时替代原始证据文本）：
-            //   首问/新话题(SIMPLE) → 仅 L1（省 token）；追问(DEEP) → 联想词扩展+L2
-            FollowupGate.Stage stage = gate.onTurn(query);
-            List<MemorySummaryService.Summary> sums = summaryService.fetchFromAme(query, recallLimit);
-            if (!sums.isEmpty()) {
-                int level = 1;
-                if (stage == FollowupGate.Stage.DEEP) {
-                    java.util.LinkedHashSet<String> kws = new java.util.LinkedHashSet<>();
-                    for (MemorySummaryService.Summary s : sums) kws.addAll(s.keywords);
-                    List<MemorySummaryService.Summary> more =
-                            summaryService.fetchByKeywords(new java.util.ArrayList<>(kws), 3);
-                    java.util.LinkedHashMap<String, MemorySummaryService.Summary> merged =
-                            new java.util.LinkedHashMap<>();
-                    for (MemorySummaryService.Summary s : sums) merged.put(s.toJson(), s);
-                    for (MemorySummaryService.Summary s : more) merged.putIfAbsent(s.toJson(), s);
-                    sums = new java.util.ArrayList<>(merged.values());
-                    level = 2;
-                }
-                String ctx = summaryService.buildContext(sums, level);
-                items.clear();
-                items.add(new EvidenceItem(ctx, System.currentTimeMillis() / 1000, 1.0));
-                Log.d(TAG, "[" + sessionId + "] 摘要渐进注入 stage=" + stage
-                        + " 条数=" + sums.size() + " level=" + level + " 上下文=" + ctx.length() + "字");
-            }
             pr = buildSystemPrompt(items);
         } catch (org.json.JSONException e) {
             // Kotlin 中 JSON 异常非受检、直接外抛；Java 这里包装为 RuntimeException 等价传播
@@ -358,6 +334,9 @@ public class MemoryOrchestrator {
                                               Set<String> windowTexts)
             throws org.json.JSONException {
         List<EvidenceItem> items = new ArrayList<>();
+        List<MemorySummaryService.Summary> summaries = new ArrayList<>();
+        FollowupGate.Stage stage = gate.onTurn(query);
+        long summaryTime = 0;
         int skipped = 0;
         String recallRaw = engine.recall(query, limit);
         JSONArray evs = new JSONArray(recallRaw);
@@ -365,6 +344,11 @@ public class MemoryOrchestrator {
                 + " deduplicatedEvidence=" + evs.length());
         for (int i = 0; i < evs.length(); i++) {
             JSONObject e = evs.getJSONObject(i);
+            if (MemorySummaryService.isSummary(e)) {
+                MemorySummaryService.addIfValid(e, summaries);
+                summaryTime = Math.max(summaryTime, e.optLong("ts"));
+                continue;
+            }
             String txt = e.getString("text");
             if (windowTexts.contains(txt)) {   // `in` 集合判断
                 skipped++;
@@ -376,6 +360,8 @@ public class MemoryOrchestrator {
             Log.d(TAG, "[" + sessionId + "] Evidence[" + items.size() + "] score="
                     + e.optDouble("score") + " chars=" + txt.length());
         }
+        if (!summaries.isEmpty())
+            items.add(new EvidenceItem(summaryService.contextFor(summaries, stage), summaryTime, 1.0));
         if (skipped > 0) Log.d(TAG, "[" + sessionId + "] Window overlap filtered: count=" + skipped);
         if (items.isEmpty()) {
             Log.w(TAG, "[" + sessionId + "] Recall has no evidence after window filtering; no memory injected");
