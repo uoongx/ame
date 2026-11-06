@@ -6,13 +6,6 @@
 
 using namespace ame;
 
-static int failures = 0;
-
-static void check(bool ok, const char* name) {
-  std::printf("%s: %s\n", ok ? "PASS" : "FAIL", name);
-  if (!ok) ++failures;
-}
-
 static bool recall_has(Engine& e, const char* query, const char* needle) {
   SeedQuery q;
   q.text = query;
@@ -22,6 +15,11 @@ static bool recall_has(Engine& e, const char* query, const char* needle) {
 }
 
 int main() {
+  int failures = 0;
+  const auto check = [&failures](bool ok, const char* name) {
+    std::printf("%s: %s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) ++failures;
+  };
   Engine e;
   auto r1 = e.remember_turn("user", "my password is zephyrus", 100);
   auto r2 = e.remember_turn("user", "favorite drink is quokka", 200);

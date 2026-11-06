@@ -17,6 +17,8 @@ String detail = service.buildContext(items, 2);
 String original = service.buildContext(items, 3);
 ```
 
+`Summary` 为只读值，调用方可通过 `getL1()`、`getL2()`、`getL3()` 和 `getKeywords()` 读取，原先直接读写字段的代码需要迁移。手工构造使用 `new Summary(l1, l2, keywords, l3)`，构造时复制联想词。
+
 级别 0 或空集合生成空上下文。L1 上限为 60 个 UTF-16 单元，L2 为 300，联想词最多 6 个。
 `fetchByKeywords(terms, limitPerKeyword)` 返回按联想词查询的摘要，按内容去重。
 
@@ -33,4 +35,4 @@ L1/L2 每次装配最多 1500 个 UTF-16 单元，截断时保护代理对。L3 
 `ame_e2e_summary` 为离线 C++ 检查，验证摘要事件的写入、说话人和召回。
 Android Java 层的离线回归覆盖摘要生成、旧事件兼容、追问判定与不合法摘要的降级。
 
-Java 离线验证使用 Java 17，设置 `JSON_JAR` 指向本地 `json-20240303.jar` 并执行 `sh android/tests/run-summary-tests.sh`。
+Java 离线验证使用 Java 17，设置 `JSON_JAR` 指向本地 `json-20240303.jar` 并执行 `bash android/tests/run-summary-tests.sh`。

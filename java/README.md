@@ -11,7 +11,7 @@ SDK 通过 JNI 调用 AME C++ 引擎，没有第三方 Java 运行依赖，不�
 在准备好工具链的 Linux x86_64 节点，从仓库根目录执行：
 
 ```sh
-sh .cloudbuild/build.sh
+bash .cloudbuild/build.sh
 ```
 
 需要 JDK 17+、Maven 3.8+、CMake 3.24+、g++ / make、Python 3.8+ 和 binutils。公司 Maven settings、缓存、并行度及 glibc 上限配置见 [.cloudbuild 接入说明](../.cloudbuild/README.md)。该入口每次在隔离目录重新编译 JNI，打包本次 SO，显式执行真实 JNI 测试；全部成功后输出：
@@ -113,7 +113,7 @@ try (AmeEngine memory = AmeEngine.open(Path.of("data", "visitor-123"))) {
 - `save()` 全量持久化；`close()` 保存并释放，可重复调用。关闭后其他操作抛 `IllegalStateException`；关闭保存失败仍释放句柄和锁。
 - I/O 失败使用 `UncheckedIOException`，无效输入使用 `IllegalArgumentException` 或 `NullPointerException`，平台/native/ABI 加载问题使用 `UnsatisfiedLinkError`。
 
-应用应按可信用户身份选择独立目录并复用实例。`.ame.lock` 拒绝同目录被多个实例或进程同时打开，但不提供租户鉴权或多副本一致性。每个实例的方法通过 `synchronized` 串行执行；响应式服务应安排到工作线程。上层超时或线程中断不能取消 C++ 操作，实例必须显式关闭。
+应用应按可信用户身份选择独立目录并复用实例。`.ame.lock` 拒绝同目录被多个实例或进程同时打开，但不提供租户鉴权或多副本一致性。同一实例的引擎状态由 JNI 实例锁保护；响应式服务应安排到工作线程。上层超时或线程中断不能取消 C++ 操作，实例必须显式关闭。
 
 SDK 不接受模型 key。当前写入使用内置规则提取器和默认向量实现，Java API 没有提取器或 embedding 注入接口。当前上下文、业务规则、模型调用及身份系统继续由应用管理。
 

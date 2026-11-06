@@ -160,7 +160,7 @@ class Build:
         self.env["PATH"] = str(Path(java_home) / "bin") + os.pathsep + self.env["PATH"]
 
     def validate_environment(self):
-        for tool in ("sh", "java", "javac", "mvn", "g++", "cmake", "make", "readelf", "nm", "sha256sum", "readlink"):
+        for tool in ("bash", "java", "javac", "mvn", "g++", "cmake", "make", "readelf", "nm", "sha256sum", "readlink"):
             require(shutil.which(tool, path=self.env["PATH"]), "Missing build tool: " + tool)
         jobs = self.env.get("AME_BUILD_JOBS", "2")
         require(re.fullmatch(r"[1-9][0-9]*", jobs), "AME_BUILD_JOBS must be a positive integer")
@@ -217,7 +217,7 @@ class Build:
 
     def build_native(self):
         native = self.run / "native"
-        self.execute("native-build", ["sh", ROOT / "java/scripts/build-linux-native.sh", native])
+        self.execute("native-build", ["bash", ROOT / "java/scripts/build-linux-native.sh", native])
         header = (native / "elf-header.txt").read_text()
         require("ELF64" in header and "Advanced Micro Devices X86-64" in header, "JNI binary is not ELF64 x86_64")
         self.status["required_glibc"] = required_glibc(

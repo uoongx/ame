@@ -1,6 +1,6 @@
-#!/bin/sh
+#!/bin/bash
 # Run inside a Linux builder with CMake, a GNU-compatible C++ compiler, JDK 17+, binutils.
-# Usage: sh java/scripts/build-linux-native.sh /absolute/output-directory
+# Usage: bash java/scripts/build-linux-native.sh /absolute/output-directory
 set -eu
 AME_SOURCE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 AME_OUTPUT=${1:?Supply a dedicated absolute output directory}

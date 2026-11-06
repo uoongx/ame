@@ -8,11 +8,10 @@
 #include <string_view>
 #include <algorithm>
 
-#include "ame/storage/storage.h"
-
 namespace ame {
 namespace {
 
+constexpr size_t kCacheEvictionDivisor = 10;  // Evict roughly one tenth when full.
 constexpr const char* kNodeCols =
     "uid,kind,type,name,text,ts,precision,importance,lat,lng,geohash,"
     "status,mention_count,attrs,embedding";
@@ -71,30 +70,22 @@ std::string ilike_escape(const std::string& s) {
 
 void PgBackend::enter_call() const {
   if (depth_ == 0) {
-    ++tick_;
     evict_if_needed();
+    ++tick_;
   }
   ++depth_;
 }
 
-void PgBackend::begin_operation() {
-  std::unique_lock<std::recursive_mutex> lock(mu_);
-  enter_call();
-  lock.release();  // The owning Storage::NodePins releases this lock.
+Storage::NodePins::CallScope::CallScope(const PgBackend& backend)
+    : lock_(backend.mu_), depth_(backend.depth_) {
+  backend.enter_call();
 }
 
-void PgBackend::end_operation() noexcept {
-  --depth_;
-  mu_.unlock();
-}
+Storage::NodePins::CallScope::~CallScope() noexcept { --depth_; }
 
-PgBackend::CallScope::CallScope(const PgBackend* s) : self(s) {
-  self->enter_call();
-}
-PgBackend::CallScope::~CallScope() { --self->depth_; }
 void PgBackend::evict_if_needed() const {
   if (cap_ == 0 || cache_.size() < cap_) return;
-  size_t target = cap_ - cap_ / 10 - 1;
+  const size_t target = cap_ - cap_ / kCacheEvictionDivisor - 1;
   std::vector<std::pair<uint64_t, const std::string*>> ord;
   ord.reserve(cache_.size());
   for (auto& kv : cache_) ord.emplace_back(kv.second.used, &kv.first);
@@ -279,8 +270,7 @@ std::vector<const Node*> PgBackend::query_nodes(const std::string& sql,
 
 Err PgBackend::put_node(Node n) {
   if (n.uid.empty()) return Err::InvalidArg;
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   if (!persist_node(n)) return Err::IoError;
   materialize(n);
   {
@@ -299,8 +289,7 @@ Err PgBackend::put_node(Node n) {
 
 Err PgBackend::upsert_edge(const Edge& e, bool add_weight) {
   if (e.from.empty() || e.to.empty()) return Err::InvalidArg;
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   if (!index_.count(e.from) || !index_.count(e.to)) return Err::NotFound;
   return persist_edge(e, add_weight) ? Err::Ok : Err::IoError;
 }
@@ -337,8 +326,7 @@ bool PgBackend::persist_edge(const Edge& e, bool add_weight) {
 }
 
 Err PgBackend::delete_node(const std::string& uid) {
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   if (!index_.count(uid)) return Err::NotFound;
   if (!exec("WITH removed_edges AS (DELETE FROM ame_edges WHERE ns=$1 AND "
             "(from_uid=$2 OR to_uid=$2)) DELETE FROM ame_nodes WHERE ns=$1 AND uid=$2", {ns_, uid}))
@@ -355,8 +343,7 @@ Err PgBackend::delete_node(const std::string& uid) {
 }
 
 const Edge* PgBackend::find_edge(const std::string& from, const std::string& to, RelType t) const {
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   auto r = exec(
       std::string("SELECT ") + kEdgeCols +
           " FROM ame_edges WHERE ns=$1 AND from_uid=$2 AND to_uid=$3 AND rel_type=$4 LIMIT 1",
@@ -371,8 +358,7 @@ const Edge* PgBackend::find_edge(const std::string& from, const std::string& to,
 }
 
 const Node* PgBackend::get_node(const std::string& uid) const {
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   auto it = cache_.find(uid);
   if (it != cache_.end()) {
     it->second.used = tick_;
@@ -387,8 +373,7 @@ const Node* PgBackend::get_node(const std::string& uid) const {
 }
 
 Node* PgBackend::get_node_mut(const std::string& uid) {
-  std::lock_guard<std::recursive_mutex> lock(mu_);
-  CallScope scope(this);
+  CallScope scope(*this);
   const Node* existing = get_node(uid);
   if (!existing) return nullptr;
   auto& edit = cache_.at(uid).edit;
@@ -399,8 +384,7 @@ Node* PgBackend::get_node_mut(const std::string& uid) {
 
 std::vector<std::pair<Edge, const Node*>> PgBackend::neighbors(
     const std::string& uid, const std::vector<RelType>* rel_types) const {
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   std::vector<std::pair<Edge, const Node*>> res;
   auto want = [rel_types](RelType t) {
     if (!rel_types) return true;
@@ -441,8 +425,7 @@ std::vector<std::pair<std::string, double>> PgBackend::ann_search(const Vec& emb
                                                                   int topk) const {
   std::vector<std::pair<std::string, double>> out;
   if (embedding.empty() || topk <= 0) return out;
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   std::string lit = vec_literal(embedding);
   auto r = exec(
       "SELECT uid, 1-(embedding <=> $2::vector) AS sim FROM ame_nodes "
@@ -458,8 +441,7 @@ std::vector<std::pair<std::string, double>> PgBackend::ann_search(const Vec& emb
 }
 
 std::vector<const Node*> PgBackend::geo_lookup(double lat, double lng, double radius_m) const {
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   auto places = query_nodes(std::string("SELECT ") + kNodeCols +
                                 " FROM ame_nodes WHERE ns=$1 AND kind=$2",
                             {ns_, i64(static_cast<int>(NodeKind::Place))});
@@ -473,8 +455,7 @@ std::vector<const Node*> PgBackend::geo_lookup(double lat, double lng, double ra
 }
 
 const Node* PgBackend::find_by_name(NodeKind kind, const std::string& name) const {
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   auto it = name_index_.find(i64(static_cast<int>(kind)) + "|" + name);
   if (it == name_index_.end() || it->second.empty()) return nullptr;
   return get_node(it->second.front());
@@ -482,8 +463,7 @@ const Node* PgBackend::find_by_name(NodeKind kind, const std::string& name) cons
 
 std::vector<const Node*> PgBackend::find_all_by_name(NodeKind kind,
                                                      const std::string& name) const {
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   std::vector<const Node*> out;
   auto it = name_index_.find(i64(static_cast<int>(kind)) + "|" + name);
   if (it == name_index_.end()) return out;
@@ -494,8 +474,7 @@ std::vector<const Node*> PgBackend::find_all_by_name(NodeKind kind,
 
 const Node* PgBackend::find_by_attr(NodeKind kind, const std::string& key,
                                     const std::string& val) const {
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   Json cond = Json::object();
   cond[key] = Json::string(val);
   auto v = query_nodes(std::string("SELECT ") + kNodeCols +
@@ -505,8 +484,7 @@ const Node* PgBackend::find_by_attr(NodeKind kind, const std::string& key,
 }
 
 std::vector<const Node*> PgBackend::nodes_of_kind(NodeKind k) const {
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   return query_nodes(std::string("SELECT ") + kNodeCols + " FROM ame_nodes WHERE ns=$1 AND kind=$2",
                      {ns_, i64(static_cast<int>(k))});
 }
@@ -514,8 +492,7 @@ std::vector<const Node*> PgBackend::nodes_of_kind(NodeKind k) const {
 std::vector<const Node*> PgBackend::lexical_event_candidates(
     const std::vector<std::string>& words, int limit) const {
   if (words.empty() || limit <= 0) return {};
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   std::string sql = std::string("SELECT ") + kNodeCols +
                     " FROM ame_nodes WHERE ns=$1 AND kind=" + i64(static_cast<int>(NodeKind::Event)) +
                     " AND (text ILIKE '%'||$2||'%'";
@@ -530,8 +507,7 @@ std::vector<const Node*> PgBackend::lexical_event_candidates(
 }
 
 size_t PgBackend::node_count() const {
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   auto r = exec("SELECT count(*) FROM ame_nodes WHERE ns=$1", {ns_});
   if (!r) throw std::runtime_error("Unable to count PostgreSQL graph");
   size_t n = parse_number<size_t>(PQgetvalue(r.get(), 0, 0));
@@ -539,8 +515,7 @@ size_t PgBackend::node_count() const {
 }
 
 size_t PgBackend::edge_count() const {
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   auto r = exec("SELECT count(*) FROM ame_edges WHERE ns=$1", {ns_});
   if (!r) throw std::runtime_error("Unable to count PostgreSQL graph");
   size_t n = parse_number<size_t>(PQgetvalue(r.get(), 0, 0));
@@ -577,8 +552,7 @@ Err PgBackend::replace_graph(const std::vector<Node>& nodes, const std::vector<E
 }
 
 std::vector<Node> PgBackend::all_nodes() const {
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   std::vector<Node> out;
   auto r = exec(std::string("SELECT ") + kNodeCols + " FROM ame_nodes WHERE ns=$1", {ns_});
   if (!r) throw std::runtime_error("Unable to export PostgreSQL graph");
@@ -588,8 +562,7 @@ std::vector<Node> PgBackend::all_nodes() const {
 }
 
 std::vector<Edge> PgBackend::all_edges() const {
-  std::lock_guard<std::recursive_mutex> lk(mu_);
-  CallScope cs(this);
+  CallScope scope(*this);
   std::vector<Edge> out;
   auto r = exec(std::string("SELECT ") + kEdgeCols + " FROM ame_edges WHERE ns=$1", {ns_});
   if (!r) throw std::runtime_error("Unable to export PostgreSQL graph");

@@ -7,24 +7,63 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.LinkedHashMap;
+import java.util.Objects;
 
 public final class MemorySummaryService {
 
     private static final String TAG = "AmeMem";
 
+    private static final int BRIEF_CHARS = 60;
+    private static final int DETAIL_CHARS = 300;
+    private static final int SUMMARY_TOKEN_BUDGET = 4096;
+    private static final int KEYWORD_HIT_LIMIT = 3;
     private static final int MAX_KEYWORDS = 6;
     private static final int MAX_KEYWORD_CHARS = 40;
     private static final int MAX_CONTEXT_CHARS = 1500;
     public static final String MARK = "MEMSUM:";
 
+    private static final class SummaryFormatException extends IllegalArgumentException {
+        private static final long serialVersionUID = 1L;
+
+        SummaryFormatException(String message) { super(message); }
+        SummaryFormatException(JSONException cause) { super("Invalid summary JSON", cause); }
+    }
+
     public static final class Summary {
-        public String l1 = "";
-        public String l2 = "";
-        public List<String> keywords = new ArrayList<>();
-        public String l3 = "";
+        private final String l1;
+        private final String l2;
+        private final List<String> keywords;
+        private final String l3;
+
+        public Summary() {
+            this("", "", Collections.emptyList(), "");
+        }
+
+        public Summary(String l1, String l2, List<String> keywords, String l3) {
+            this.l1 = prefix(Objects.requireNonNull(l1, "l1"), BRIEF_CHARS);
+            this.l2 = prefix(Objects.requireNonNull(l2, "l2"), DETAIL_CHARS);
+            this.l3 = Objects.requireNonNull(l3, "l3");
+            this.keywords = copyKeywords(Objects.requireNonNull(keywords, "keywords"));
+        }
+
+        public String getL1() { return l1; }
+        public String getL2() { return l2; }
+        public List<String> getKeywords() { return keywords; }
+        public String getL3() { return l3; }
+
+        private static List<String> copyKeywords(List<String> words) {
+            int limit = Math.min(words.size(), MAX_KEYWORDS);
+            List<String> terms = new ArrayList<>(limit);
+            for (int i = 0; i < limit; i++) {
+                String term = prefix(words.get(i).trim(), MAX_KEYWORD_CHARS);
+                if (!term.isEmpty() && !terms.contains(term)) terms.add(term);
+            }
+            return Collections.unmodifiableList(terms);
+        }
 
         public String toJson() {
             try {
@@ -40,24 +79,28 @@ public final class MemorySummaryService {
         }
 
         public static Summary fromJson(String json) {
-            Summary s = new Summary();
+            return parse(json, null);
+        }
+
+        private static Summary parse(String json, String source) {
             try {
                 JSONObject jo = new JSONObject(json);
-                s.l1 = prefix(jo.getString("l1").trim(), 60);
-                if (s.l1.isEmpty()) throw new IllegalArgumentException("Empty summary");
-                s.l2 = prefix(jo.optString("l2").trim(), 300);
-                s.l3 = jo.optString("l3");
-                JSONArray ka = jo.optJSONArray("keywords");
-                if (ka != null) {
-                    for (int i = 0; i < Math.min(ka.length(), MAX_KEYWORDS); i++) {
-                        String term = prefix(ka.optString(i).trim(), MAX_KEYWORD_CHARS);
-                        if (!term.isEmpty() && !s.keywords.contains(term)) s.keywords.add(term);
-                    }
-                }
+                String l1 = jo.getString("l1").trim();
+                if (l1.isEmpty()) throw new SummaryFormatException("Empty summary");
+                String original = source == null ? jo.optString("l3") : source;
+                return new Summary(l1, jo.optString("l2").trim(), readKeywords(jo), original);
             } catch (JSONException e) {
-                throw new IllegalArgumentException("Invalid summary JSON", e);
+                throw new SummaryFormatException(e);
             }
-            return s;
+        }
+
+        private static List<String> readKeywords(JSONObject jo) {
+            JSONArray words = jo.optJSONArray("keywords");
+            if (words == null) return Collections.emptyList();
+            int limit = Math.min(words.length(), MAX_KEYWORDS);
+            List<String> terms = new ArrayList<>(limit);
+            for (int i = 0; i < limit; i++) terms.add(words.optString(i));
+            return terms;
         }
     }
 
@@ -78,30 +121,29 @@ public final class MemorySummaryService {
                 + "keywords 必填且不得为空数组。";
         String user = (question == null || question.isEmpty() ? "" : "当前问题：" + question + "\n")
                 + "材料：\n" + source;
-        Summary s = new Summary();
-        s.l3 = source;
+        Objects.requireNonNull(source, "source");
+        List<MiniMaxClient.Msg> msgs = new ArrayList<>(2);
+        msgs.add(new MiniMaxClient.Msg("system", system));
+        msgs.add(new MiniMaxClient.Msg("user", user));
         try {
-            List<MiniMaxClient.Msg> msgs = new ArrayList<>();
-            msgs.add(new MiniMaxClient.Msg("system", system));
-            msgs.add(new MiniMaxClient.Msg("user", user));
-            String resp = MiniMaxClient.chat(msgs, 4096);
-
-            String text = resp.trim();
-            if (text.startsWith("```")) {
-                int nl = text.indexOf('\n');
-                if (nl >= 0) text = text.substring(nl + 1);
-            }
-            int a = text.indexOf('{'), b = text.lastIndexOf('}');
-            if (a < 0 || b <= a) throw new IllegalArgumentException("Missing summary object");
-            Summary parsed = Summary.fromJson(text.substring(a, b + 1));
-            parsed.l3 = source;
-            return parsed;
-        } catch (RuntimeException e) {
+            String response = MiniMaxClient.chat(msgs, SUMMARY_TOKEN_BUDGET);
+            return Summary.parse(summaryObject(response), source);
+        } catch (MiniMaxClient.ChatResponseException | SummaryFormatException e) {
             Log.w(TAG, "Summary generation failed; using a source excerpt");
-            s.l1 = prefix(source, 60);
-            s.l2 = prefix(source, 300);
-            return s;
+            return new Summary(source, source, Collections.emptyList(), source);
         }
+    }
+
+    private static String summaryObject(String response) {
+        String text = response.trim();
+        if (text.startsWith("```")) {
+            int newline = text.indexOf('\n');
+            if (newline >= 0) text = text.substring(newline + 1);
+        }
+        int start = text.indexOf('{');
+        int end = text.lastIndexOf('}');
+        if (start < 0 || end <= start) throw new SummaryFormatException("Missing summary object");
+        return text.substring(start, end + 1);
     }
 
     public boolean storeToAme(Summary summary, long ts) {
@@ -140,7 +182,7 @@ public final class MemorySummaryService {
     static void addIfValid(JSONObject event, List<Summary> out) {
         try {
             out.add(read(event));
-        } catch (IllegalArgumentException e) {
+        } catch (SummaryFormatException e) {
             Log.w(TAG, "Ignoring an invalid stored summary");
         }
     }
@@ -183,7 +225,7 @@ public final class MemorySummaryService {
             unique.putIfAbsent(summary.toJson(), summary);
             keywords.addAll(summary.keywords);
         }
-        for (Summary summary : fetchByKeywords(keywords, 3)) unique.putIfAbsent(summary.toJson(), summary);
+        for (Summary summary : fetchByKeywords(keywords, KEYWORD_HIT_LIMIT)) unique.putIfAbsent(summary.toJson(), summary);
         return buildContext(new ArrayList<>(unique.values()), 2);
     }
 

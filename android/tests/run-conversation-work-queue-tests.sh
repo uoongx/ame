@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Pure Java 17 regression; no Android SDK, Gradle, JNI or network is required.
 set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)

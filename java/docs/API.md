@@ -25,7 +25,7 @@ public synchronized String stats();
 public synchronized void save();
 public synchronized void close();
 
-public synchronized String recallWithTenant(String query, int limit, AmeEngine tenant);
+public String recallWithTenant(String query, int limit, AmeEngine tenant);
 public synchronized boolean blockEvent(String eventId);
 public synchronized boolean unblockEvent(String eventId);
 public synchronized boolean deleteEvent(String eventId);
@@ -288,11 +288,11 @@ JSON 数字内部使用 `double`。当前序列化器对绝对值小于 `10^15` 
 
 ## 14. 线程、锁与取消
 
-同一引擎的实例方法通过 `synchronized` 串行化；JNI 还有每实例 mutex 与共享句柄生命周期保护。同一实例上读、写、保存、关闭不会并行执行。不同目录的独立实例可以由应用并行调用；SDK 没有应用层的实例缓存或用户路由器。
+JNI 在访问同一引擎状态时持有实例互斥锁。`recallWithTenant` 通过原生句柄取得两个实例，并同时锁定它们完成内存检索。它在释放这两把锁后从独立的结果副本生成 JSON。与关闭竞争时，检索完成或抛出 `IllegalStateException`。不同目录的独立实例可以由应用并行调用；SDK 没有应用层的实例缓存或用户路由器。
 
 每个打开的实例持续持有 `.ame.lock` 的操作系统排他锁，直到关闭或进程退出。磁盘上残留锁文件本身不代表仍被占用。该锁用于协调使用同一约定的引擎，不是租户鉴权或分布式存储协议；网络文件系统需要单独验证其文件锁和替换语义。
 
-所有 API 都是阻塞调用；响应式服务器应安排到工作线程。API 没有 timeout、取消 token 或 interrupt 回调。`Thread.interrupt()`、Future 取消、Reactor timeout 都不保证立即停止正在执行的 C++ 操作，超时后写入或保存仍可能完成。调用 `close()` 会等待已进入的同实例操作结束，也不是强制停止手段。
+所有 API 都是阻塞调用；响应式服务器应安排到工作线程。API 没有 timeout、取消 token 或 interrupt 回调。`Thread.interrupt()`、Future 取消、Reactor timeout 都不保证立即停止正在执行的 C++ 操作，超时后写入或保存仍可能完成。调用 `close()` 会等待正在访问该实例的原生临界区结束，也不是强制停止手段。
 
 图中的已有节点和边可以恢复，但加载不会恢复所有运行时状态。例如新实例的写入器不会从快照重建上一条事件的内部链尾，因此不承诺关闭重开后新写入自动接续原实例的 `NEXT` 链。需要连续会话写入时应复用引擎，避免每个请求都打开/关闭。
 
@@ -312,6 +312,6 @@ java -Dame.native.path=/absolute/path/libame_jni.so -jar your-agent.jar
 
 该属性须在首次 `open()` 前设置；同一类加载器生命周期只加载一次库，之后改属性不会切换已加载的库。JNI 导出符号随 Java 类名迁移，因此外置 SO 也须替换为同次构建产物；ABI 2 不兼容 `io.ame` 旧库。SDK 不从自定义环境变量或 HTTP 配置读取此值，也不自动下载缺失的库。
 
-交付文件为 `build/cloudbuild/artifacts/convai-ame-java-<version>.jar` 及同目录的 `convai-ame-java.pom`，版本从这份交付 POM 或归档元数据读取，使用上述标准 Maven 坐标引用，不带 classifier。固定的只是交付 POM 文件名，groupId/artifactId 沿用上述坐标，Maven 仓库仍使用标准带版本布局。构建入口仍是 `sh .cloudbuild/build.sh`，只打包本地产物，不自动 `install` 或 `deploy`；诊断归档和校验步骤见 [SDK README](../README.md)。Linux 运行时还必须满足实际 SO 的 glibc 要求；构建默认不设置版本上限，仅在显式配置 `AME_MAX_GLIBC` 时检查。实际要求以本次归档 `metadata/build.json` 的 `required_glibc` 及测试日志为准，[Linux 验证记录](LINUX-VALIDATION.md) 保留其记录的历史坐标、Java 包与产物证据。版本号和 Java 字节码目标都不能替代目标系统验证。
+交付文件为 `build/cloudbuild/artifacts/convai-ame-java-<version>.jar` 及同目录的 `convai-ame-java.pom`，版本从这份交付 POM 或归档元数据读取，使用上述标准 Maven 坐标引用，不带 classifier。固定的只是交付 POM 文件名，groupId/artifactId 沿用上述坐标，Maven 仓库仍使用标准带版本布局。构建入口仍是 `bash .cloudbuild/build.sh`，只打包本地产物，不自动 `install` 或 `deploy`；诊断归档和校验步骤见 [SDK README](../README.md)。Linux 运行时还必须满足实际 SO 的 glibc 要求；构建默认不设置版本上限，仅在显式配置 `AME_MAX_GLIBC` 时检查。实际要求以本次归档 `metadata/build.json` 的 `required_glibc` 及测试日志为准，[Linux 验证记录](LINUX-VALIDATION.md) 保留其记录的历史坐标、Java 包与产物证据。版本号和 Java 字节码目标都不能替代目标系统验证。
 
 公共接口以本文列出的方法为准。C++ 内部的注册实体、精确查询、时间过滤、修改权重等能力没有因此自动成为 Java 公共接口；应用适配层的 provider、用户缓存和失败回退也不是 SDK 内置配置项。

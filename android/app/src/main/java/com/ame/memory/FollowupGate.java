@@ -1,10 +1,19 @@
 package com.ame.memory;
 
 import java.util.HashSet;
-import java.util.Set;
 import java.util.Locale;
+import java.util.Set;
 
 public final class FollowupGate {
+    private static final int MAX_MARKED_FOLLOWUP_LENGTH = 30;
+    private static final int MAX_RELATED_FOLLOWUP_LENGTH = 40;
+    private static final int MIN_OVERLAP = 2;
+    private static final int NEW_TOPIC_LENGTH_THRESHOLD = 12;
+    private static final int MIN_ASCII_TOKEN_LENGTH = 3;
+    private static final int MAX_INITIAL_TOKEN_CAPACITY = 256;
+    private static final String[] FOLLOWUP_MARKERS = {
+        "那", "还有", "继续", "详细", "具体", "为什么", "怎么办", "呢", "吗", "再"
+    };
 
     public enum Stage { SIMPLE, DEEP }
 
@@ -16,67 +25,74 @@ public final class FollowupGate {
     }
 
     public Stage onTurn(String query) {
-        String q = query == null ? "" : query.trim();
-        if (isFollowup(q, lastQuery)) {
-            stage = Stage.DEEP;
-        } else if (isNewTopic(q, lastQuery)) {
-            stage = Stage.SIMPLE;
-        }
-        lastQuery = q;
+        String current = query == null ? "" : query.trim();
+        stage = nextStage(current, lastQuery, stage);
+        lastQuery = current;
         return stage;
     }
 
-    public static boolean isFollowup(String q, String prev) {
-        if (prev == null || prev.isEmpty() || q.isEmpty()) return false;
-        if (q.contains("换个话题") || q.contains("新话题")) return false;
-        if (q.length() <= 30) {
-            String[] marks = {"那", "还有", "继续", "详细", "具体", "为什么", "怎么办", "呢", "吗", "再"};
-            for (String m : marks)
-                if (q.contains(m)) return true;
-        }
-        return q.length() <= 40 && overlap(q, prev) >= 2;
+    private static Stage nextStage(String query, String previous, Stage current) {
+        if (previous.isEmpty() || query.isEmpty()) return current;
+        if (explicitNewTopic(query)) return Stage.SIMPLE;
+        if (markedFollowup(query)) return Stage.DEEP;
+        int common = overlap(query, previous);
+        if (query.length() <= MAX_RELATED_FOLLOWUP_LENGTH && common >= MIN_OVERLAP) return Stage.DEEP;
+        if (query.length() > NEW_TOPIC_LENGTH_THRESHOLD && common == 0
+                && !query.contains("呢") && !query.contains("吗")) return Stage.SIMPLE;
+        return current;
     }
 
-    private static boolean isNewTopic(String q, String prev) {
-        if (prev == null || prev.isEmpty() || q.isEmpty()) return false;
-        if (q.contains("换个话题") || q.contains("新话题")) return true;
-        return q.length() > 12 && overlap(q, prev) == 0 && !q.contains("呢") && !q.contains("吗");
+    public static boolean isFollowup(String query, String previous) {
+        if (previous == null || query == null || query.length() > MAX_RELATED_FOLLOWUP_LENGTH) return false;
+        return nextStage(query, previous, Stage.SIMPLE) == Stage.DEEP;
+    }
+
+    private static boolean explicitNewTopic(String query) {
+        return query.contains("换个话题") || query.contains("新话题");
+    }
+
+    private static boolean markedFollowup(String query) {
+        if (query.length() > MAX_MARKED_FOLLOWUP_LENGTH) return false;
+        for (String marker : FOLLOWUP_MARKERS) {
+            if (query.contains(marker)) return true;
+        }
+        return false;
     }
 
     static int overlap(String a, String b) {
-        Set<String> ta = tokens(a), tb = tokens(b);
-        int n = 0;
-        for (String t : ta)
-            if (tb.contains(t)) n++;
-        return n;
+        Set<String> first = tokens(a);
+        Set<String> second = tokens(b);
+        int count = 0;
+        for (String term : first) {
+            if (second.contains(term)) count++;
+        }
+        return count;
     }
 
-    private static Set<String> tokens(String s) {
-        Set<String> out = new HashSet<>();
+    private static Set<String> tokens(String text) {
+        Set<String> out = new HashSet<>(Math.min(text.length(), MAX_INITIAL_TOKEN_CAPACITY));
         StringBuilder ascii = new StringBuilder();
-        StringBuilder cjk = new StringBuilder();
-        Runnable flushAscii = () -> {
-            if (ascii.length() >= 3) out.add(ascii.toString().toLowerCase(Locale.ROOT));
-            ascii.setLength(0);
-        };
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c < 128 && Character.isLetterOrDigit(c)) {
+        char previousCjk = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c <= '\u007f' && Character.isLetterOrDigit(c)) {
                 ascii.append(c);
+                continue;
+            }
+            flushAscii(ascii, out);
+            if (Character.UnicodeBlock.of(c) == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS) {
+                if (previousCjk != 0) out.add(String.valueOf(previousCjk) + c);
+                previousCjk = c;
             } else {
-                flushAscii.run();
-                if (c >= 0x4E00 && c <= 0x9FFF) {
-                    cjk.append(c);
-                    if (cjk.length() >= 2) {
-                        out.add(cjk.substring(cjk.length() - 2));
-                        cjk.deleteCharAt(0);
-                    }
-                } else {
-                    cjk.setLength(0);
-                }
+                previousCjk = 0;
             }
         }
-        flushAscii.run();
+        flushAscii(ascii, out);
         return out;
+    }
+
+    private static void flushAscii(StringBuilder token, Set<String> out) {
+        if (token.length() >= MIN_ASCII_TOKEN_LENGTH) out.add(token.toString().toLowerCase(Locale.ROOT));
+        token.setLength(0);
     }
 }

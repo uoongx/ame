@@ -18,7 +18,7 @@
 
 AME 提供记忆写入和检索证据，应用继续负责用户鉴权、当前上下文、业务规则、模型调用及回答输出。当前 Java API 使用内置规则提取和默认向量实现，没有 embedding/提取器注入、模型调用或远程存储配置入口。
 
-从仓库根目录执行 `sh .cloudbuild/build.sh`，在 `build/cloudbuild/artifacts/` 得到 `convai-ame-java-<version>.jar`、`convai-ame-java.pom`、`convai-ame-java-linux-x86_64.tar.gz` 诊断归档和 `SHA256SUMS`。独立 JAR/POM 可直接交给平台制品发布步骤，无需先解包；构建脚本只生成本地产物，不自动 `install` 或 `deploy`。交付 POM 文件名固定，groupId/artifactId 沿用上述坐标，实际版本从 POM 读取，JAR 文件名仍带版本。完整构建、解包与校验命令见 [SDK README](../README.md)。
+从仓库根目录执行 `bash .cloudbuild/build.sh`，在 `build/cloudbuild/artifacts/` 得到 `convai-ame-java-<version>.jar`、`convai-ame-java.pom`、`convai-ame-java-linux-x86_64.tar.gz` 诊断归档和 `SHA256SUMS`。独立 JAR/POM 可直接交给平台制品发布步骤，无需先解包；构建脚本只生成本地产物，不自动 `install` 或 `deploy`。交付 POM 文件名固定，groupId/artifactId 沿用上述坐标，实际版本从 POM 读取，JAR 文件名仍带版本。完整构建、解包与校验命令见 [SDK README](../README.md)。
 
 Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源路径同步迁移；调用方须把 import 改为 `com.huawei.convai.ame.AmeEngine`，并更新反射类名或示例启动类后重新编译。Maven groupId/artifactId 和无 classifier 的构件形式不变，Linux 平台限制和 `ame.native.path` 属性也不变。若使用外置 SO，应替换为同次构建的 SO；新 JAR 不应混用旧 Java 包对应的 JNI 库。
 

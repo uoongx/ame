@@ -11,7 +11,7 @@ import java.util.Objects;
  * must not open the same directory concurrently in multiple instances or processes. The native
  * engine holds an exclusive directory lock and rejects a second open while that lock is held.
  *
- * <p>Methods on an instance are serialized. Results are JSON strings so applications may use
+ * <p>Access to an engine's native state is serialized. Results are JSON strings so applications may use
  * their own JSON library. This API does not call a model or accept model credentials.
  */
 public final class AmeEngine implements AutoCloseable {
@@ -72,7 +72,7 @@ public final class AmeEngine implements AutoCloseable {
   }
 
   /** Combines private and tenant evidence for this query. Both engines must be open. */
-  public synchronized String recallWithTenant(String query, int limit, AmeEngine tenant) {
+  public String recallWithTenant(String query, int limit, AmeEngine tenant) {
     Objects.requireNonNull(tenant, "tenant");
     if (tenant == this) throw new IllegalArgumentException("Tenant must be a different engine");
     return recallFrom(query, limit, tenant.requireOpen());

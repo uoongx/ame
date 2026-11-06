@@ -11,6 +11,7 @@
 
 #include "ame/core/json.h"
 #include "ame/core/types.h"
+#include "ame/storage/storage.h"
 
 namespace ame {
 
@@ -45,15 +46,10 @@ class PgBackend {
   std::vector<Node> all_nodes() const;
   std::vector<Edge> all_edges() const;
   Err replace_graph(const std::vector<Node>& nodes, const std::vector<Edge>& edges);
-  void begin_operation();
-  void end_operation() noexcept;
 
  private:
-  struct CallScope {
-    const PgBackend* self;
-    explicit CallScope(const PgBackend* s);
-    ~CallScope();
-  };
+  using CallScope = Storage::NodePins::CallScope;
+  friend CallScope;
   void evict_if_needed() const;
   struct ResultDeleter { void operator()(PGresult* r) const noexcept { PQclear(r); } };
   struct ConnectionDeleter { void operator()(PGconn* c) const noexcept { PQfinish(c); } };
@@ -86,7 +82,8 @@ class PgBackend {
 
   std::unique_ptr<PGconn, ConnectionDeleter> conn_;
   std::string ns_;
-  size_t cap_ = 50000;
+  static constexpr size_t kDefaultCacheNodeLimit = 50000;
+  size_t cap_ = kDefaultCacheNodeLimit;
   mutable uint64_t tick_ = 0;
   mutable int depth_ = 0;
   mutable std::recursive_mutex mu_;

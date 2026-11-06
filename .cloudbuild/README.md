@@ -3,7 +3,7 @@
 在仓库根目录执行：
 
 ```sh
-sh .cloudbuild/build.sh
+bash .cloudbuild/build.sh
 ```
 
 也可用脚本的绝对路径调用，不依赖流水线的当前目录或 `WORKSPACE` 变量。入口只构建并打包 AME Java SDK 和 JNI，生成可交给公司平台制品发布步骤的本地 JAR/POM；不启动 Agent、不调用模型，也不自动执行 Maven `install` 或远端 `deploy`。失败返回非零退出码。
@@ -24,7 +24,7 @@ SDK 版本的唯一源码配置是 [java/pom.xml](../java/pom.xml) 顶层项目 
 | Java | JDK 17+，含 `java`、`javac` 和 JNI 头文件；Java 字节码固定为 release 17 |
 | C++ | g++，支持 C++17，含可静态链接的 libstdc++ / libgcc；make |
 | CMake | 3.24+，支持 headless JDK 的 JNI 查找 |
-| 打包工具 | Maven 3.8+、Python 3.8+（只用标准库）、POSIX sh |
+| 打包工具 | Maven 3.8+、Python 3.8+（只用标准库）、Bash |
 | 系统工具 | binutils（readelf、nm）、coreutils（sha256sum、readlink 等）；git 可选 |
 
 构建节点需要能访问公司配置的 Maven 镜像，或预先准备完整的 Maven 本地缓存。镜像名称、资源池和归档插件版本由实际公司任务配置；本仓库未假定它们，也未提供未经平台验证的 YAML。
@@ -46,7 +46,7 @@ SDK 版本的唯一源码配置是 [java/pom.xml](../java/pom.xml) 顶层项目 
 AME_BUILD_JOBS=4 \
 AME_MAVEN_SETTINGS=/ci/config/maven-settings.xml \
 AME_MAVEN_REPO=/ci/cache/maven \
-sh .cloudbuild/build.sh
+bash .cloudbuild/build.sh
 ```
 
 默认不设置 glibc 上限，也不要求构建环境必须使用 2.36。脚本始终从实际 ELF 中提取最高 glibc 符号版本，写入 `metadata/build.json` 的 `required_glibc`；未设上限时 `max_glibc` 为 `null`。如需约束部署兼容性，可设置 `AME_MAX_GLIBC=2.28` 等目标版本（支持 `2.<minor>[.<patch>]`），超出即构建失败。

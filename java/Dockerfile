@@ -27,7 +27,7 @@ COPY java/src/main/java/ java/src/main/java/
 COPY java/src/main/resources/ java/src/main/resources/
 COPY java/src/test/java/ java/src/test/java/
 COPY .cloudbuild/ .cloudbuild/
-RUN sh .cloudbuild/build.sh
+RUN bash .cloudbuild/build.sh
 
 FROM scratch AS artifact
 COPY --from=builder /src/build/cloudbuild/artifacts/ /

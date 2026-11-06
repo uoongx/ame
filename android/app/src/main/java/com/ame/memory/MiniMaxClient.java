@@ -46,6 +46,18 @@ public final class MiniMaxClient {
     private MiniMaxClient() {
     }
 
+    static final class ChatResponseException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        ChatResponseException(String message) {
+            super(message);
+        }
+
+        ChatResponseException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
     /** 一条消息：text 必有；imageB64 非空时走多模态 content 数组 */
     public static final class Msg {
         public final String role;
@@ -103,8 +115,7 @@ public final class MiniMaxClient {
                     .put("messages", arr)
                     .toString();
         } catch (org.json.JSONException e) {
-            // Kotlin 中 JSON 异常非受检；Java 这里包装为 RuntimeException 等价传播
-            throw new RuntimeException(e);
+            throw new IllegalArgumentException("Unable to encode chat request", e);
         }
         // trimEnd('/') 等价：去掉末尾的 '/'
         String base = BuildConfig.MINIMAX_BASE_URL;
@@ -120,13 +131,13 @@ public final class MiniMaxClient {
             String text = resp.body() != null ? resp.body().string() : "";
             if (!resp.isSuccessful()) {
                 Log.e(TAG, "MiniMax HTTP " + resp.code() + ": responseChars=" + text.length());
-                throw new RuntimeException("MiniMax HTTP " + resp.code());
+                throw new ChatResponseException("MiniMax HTTP " + resp.code());
             }
             JSONObject jo;
             try {
                 jo = new JSONObject(text);
             } catch (org.json.JSONException e) {
-                throw new RuntimeException(e);
+                throw new ChatResponseException("Invalid MiniMax chat response", e);
             }
             JSONObject usage = jo.optJSONObject("usage");
             Log.d(TAG, "MiniMax 200: model=" + BuildConfig.MINIMAX_MODEL
@@ -137,7 +148,7 @@ public final class MiniMaxClient {
                 content = jo.getJSONArray("choices").getJSONObject(0)
                         .getJSONObject("message").getString("content");
             } catch (org.json.JSONException e) {
-                throw new RuntimeException(e);
+                throw new ChatResponseException("Invalid MiniMax chat response", e);
             }
             // M3 偶发把工具调用意图写成 <function_calls> XML 吐在 content 里
             // （问时间/天气时它"想"调 web_search）——剥除。
@@ -153,7 +164,7 @@ public final class MiniMaxClient {
             }
             return clean;
         } catch (IOException e) {
-            throw new RuntimeException(e);
+            throw new ChatResponseException("MiniMax chat I/O failed", e);
         }
     }
 

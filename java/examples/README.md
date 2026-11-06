@@ -14,7 +14,7 @@ SDK Java 包已迁移至 `com.huawei.convai.ame`，JNI 资源为 `com/huawei/con
 自动读取 POM 的辅助命令需要 Python 3；没有 Python 时，可省略 `AME_VERSION` 读取段，直接把 `JAR` 设为交付文件的实际路径。SDK 运行本身不依赖 Python。
 
 ```sh
-sh .cloudbuild/build.sh
+bash .cloudbuild/build.sh
 (cd build/cloudbuild/artifacts && sha256sum -c SHA256SUMS)
 AME_VERSION=$(python3 - <<'PY'
 import xml.etree.ElementTree as ET

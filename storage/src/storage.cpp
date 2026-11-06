@@ -63,17 +63,15 @@ Storage::NodePins Storage::pin_nodes() const {
 #endif
 }
 
-Storage::NodePins::NodePins(PgBackend* backend) : backend_(backend) {
 #ifdef AME_WITH_POSTGRES
-  if (backend_) backend_->begin_operation();
-#endif
+Storage::NodePins::NodePins(PgBackend* backend) {
+  if (backend) scope_.emplace(*backend);
 }
+#else
+Storage::NodePins::NodePins(PgBackend* backend) : backend_(backend) {}
+#endif
 
-Storage::NodePins::~NodePins() {
-#ifdef AME_WITH_POSTGRES
-  if (backend_) backend_->end_operation();
-#endif
-}
+Storage::NodePins::~NodePins() = default;
 
 bool Storage::pg_active() const {
 #ifdef AME_WITH_POSTGRES

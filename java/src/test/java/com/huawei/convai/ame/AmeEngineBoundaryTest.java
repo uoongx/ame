@@ -14,6 +14,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 
 /** Native lifecycle and corrupt-snapshot checks; execute against the packaged JNI library. */
@@ -219,7 +220,7 @@ public final class AmeEngineBoundaryTest {
       tenant.rememberTurn("guide", "tenant walrus", 1, "", "");
       var start = new CountDownLatch(1);
       var active = new CountDownLatch(2);
-      var pool = Executors.newFixedThreadPool(3);
+      var pool = namedPool(2, "ame-tenant-read-");
       try {
         var forward = pool.submit(() -> tenantReads(start, active, session, tenant));
         var reverse = pool.submit(() -> tenantReads(start, active, tenant, session));
@@ -266,7 +267,7 @@ public final class AmeEngineBoundaryTest {
   private static void runNativeCloseRace(Path directory, Method open, Method stats, Method close)
       throws Exception {
     long handle = (Long) open.invoke(null, directory.toAbsolutePath().toString());
-    var pool = Executors.newFixedThreadPool(5);
+    var pool = namedPool(5, "ame-native-close-");
     try {
       CountDownLatch start = new CountDownLatch(1);
       List<Future<?>> futures = submitStatsReaders(pool, start, stats, handle);
@@ -286,6 +287,12 @@ public final class AmeEngineBoundaryTest {
       futures.add(pool.submit(() -> readStatsAfterStart(start, stats, handle)));
     }
     return futures;
+  }
+
+  private static ExecutorService namedPool(int size, String prefix) {
+    var sequence = new AtomicInteger();
+    return Executors.newFixedThreadPool(size,
+        task -> new Thread(task, prefix + sequence.incrementAndGet()));
   }
 
   private static Void readStatsAfterStart(CountDownLatch start, Method stats, long handle)

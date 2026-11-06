@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Set JSON_JAR to org.json:json:20240303. The test uses the real orchestration with offline fakes.
 set -eu
 : "${JSON_JAR:?Set JSON_JAR to json-20240303.jar}"

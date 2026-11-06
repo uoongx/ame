@@ -10,7 +10,6 @@
 
 using namespace ame;
 
-static int failures = 0;
 #define CHECK(cond)                                              \
   do {                                                           \
     if (!(cond)) {                                               \
@@ -31,7 +30,7 @@ static bool has_original_embedding(Storage& storage) {
   return event && event->embedding.size() == 128;
 }
 
-static void verify_rollback(Storage& storage, const Json& snap) {
+static void verify_rollback(Storage& storage, const Json& snap, int& failures) {
   // Roll back both SQL tables and retain the original name index and cache
   // when pgvector rejects a node midway through a replacement.
   if (snap.find("nodes") == nullptr || snap.find("nodes")->arr.empty()) {
@@ -55,7 +54,7 @@ static void verify_rollback(Storage& storage, const Json& snap) {
   }
 }
 
-static void storage_roundtrip(const std::string& conn, const std::string& prefix) {
+static void storage_roundtrip(const std::string& conn, const std::string& prefix, int& failures) {
   Storage st;
   CHECK(st.pg_active() == false);
   CHECK(st.connect_pg(conn, prefix + "graph") == Err::Ok);
@@ -108,7 +107,7 @@ static void storage_roundtrip(const std::string& conn, const std::string& prefix
   CHECK(st2.node_count() == 3 && st2.edge_count() == 1);
   CHECK(st2.find_by_name(NodeKind::Entity, "Caroline") != nullptr);
 
-  verify_rollback(st2, snap);
+  verify_rollback(st2, snap, failures);
   CHECK(st2.from_json(Json::object()) == Err::Ok);
   CHECK(st2.node_count() == 0);
 
@@ -116,7 +115,7 @@ static void storage_roundtrip(const std::string& conn, const std::string& prefix
   CHECK(st.node_count() == 0);
 }
 
-static void bounded_cache(const std::string& conn, const std::string& prefix) {
+static void bounded_cache(const std::string& conn, const std::string& prefix, int& failures) {
   setenv("AME_PG_CACHE_NODES", "3", 1);
   Storage st3;
   CHECK(st3.connect_pg(conn, prefix + "lru") == Err::Ok);
@@ -137,12 +136,19 @@ static void bounded_cache(const std::string& conn, const std::string& prefix) {
   }
   CHECK(all_ok);
   CHECK(st3.pg_cache_size() <= 4);
-  {
+  bool rejected = false;
+  try {
     auto pins = st3.pin_nodes();
     const Node* first = st3.get_node("lru0");
     for (int i = 1; i < 6; ++i) CHECK(st3.get_node("lru" + std::to_string(i)) != nullptr);
     CHECK(first && first->text == "body0");
+    // A PostgreSQL text parameter cannot contain NUL. Both nested guards
+    // must unwind before the next call can evict the excess cached nodes.
+    (void)st3.lexical_event_candidates({std::string("a\0b", 3)}, 1);
+  } catch (const std::runtime_error&) {
+    rejected = true;
   }
+  CHECK(rejected);
   CHECK(st3.get_node("lru0") != nullptr);
   CHECK(st3.pg_cache_size() <= 4);
   CHECK(st3.find_by_name(NodeKind::Entity, "LRU5") != nullptr);
@@ -152,7 +158,7 @@ static void bounded_cache(const std::string& conn, const std::string& prefix) {
   unsetenv("AME_PG_CACHE_NODES");
 }
 
-static void benchmark_small_cache(const std::string& connection, const std::string& prefix) {
+static void benchmark_small_cache(const std::string& connection, const std::string& prefix, int& failures) {
   setenv("AME_PG_CACHE_NODES", "2", 1);
   Engine engine;
   CHECK(engine.open_postgres(connection, prefix + "questions") == Err::Ok);
@@ -172,7 +178,7 @@ static void benchmark_small_cache(const std::string& connection, const std::stri
   CHECK(engine.clear_memory() == Err::Ok);
 }
 
-static void required_write_failure(const std::string& connection, const std::string& prefix) {
+static void required_write_failure(const std::string& connection, const std::string& prefix, int& failures) {
   Engine engine;
   CHECK(engine.open_postgres(connection, prefix + "reject") == Err::Ok);
   if (!engine.storage().pg_active()) return;
@@ -189,7 +195,7 @@ static void required_write_failure(const std::string& connection, const std::str
   CHECK(engine.clear_memory() == Err::Ok);
 }
 
-static void shared_graph(const std::string& conn, const std::string& prefix) {
+static void shared_graph(const std::string& conn, const std::string& prefix, int& failures) {
   Engine t1, t2, s1;
   CHECK(t1.open_postgres(conn, prefix + "tenant_t1") == Err::Ok);
   CHECK(t2.open_postgres(conn, prefix + "tenant_t2") == Err::Ok);
@@ -229,17 +235,18 @@ static void shared_graph(const std::string& conn, const std::string& prefix) {
 }
 
 int main() {
+  int failures = 0;
   const char* connection = std::getenv("AME_PG_CONN");
   if (!connection || !*connection) {
     std::printf("SKIP test_pg_storage: AME_PG_CONN is unset\n");
     return 77;
   }
   const std::string prefix = "ame_test_" + gen_uid() + "_";
-  storage_roundtrip(connection, prefix);
-  bounded_cache(connection, prefix);
-  shared_graph(connection, prefix);
-  required_write_failure(connection, prefix);
-  benchmark_small_cache(connection, prefix);
+  storage_roundtrip(connection, prefix, failures);
+  bounded_cache(connection, prefix, failures);
+  shared_graph(connection, prefix, failures);
+  required_write_failure(connection, prefix, failures);
+  benchmark_small_cache(connection, prefix, failures);
 
   if (failures == 0) std::printf("PASS test_pg_storage\n");
   return failures == 0 ? 0 : 1;

@@ -22,6 +22,10 @@
 #include "ame/core/json.h"
 
 #include <memory>
+#ifdef AME_WITH_POSTGRES
+#include <mutex>
+#include <optional>
+#endif
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
@@ -92,7 +96,23 @@ class Storage {
    private:
     friend class Storage;
     explicit NodePins(PgBackend* backend);
+#ifdef AME_WITH_POSTGRES
+    friend class PgBackend;
+    class CallScope {
+     public:
+      explicit CallScope(const PgBackend& backend);
+      ~CallScope() noexcept;
+      CallScope(const CallScope&) = delete;
+      CallScope& operator=(const CallScope&) = delete;
+
+     private:
+      std::lock_guard<std::recursive_mutex> lock_;
+      int& depth_;
+    };
+    std::optional<CallScope> scope_;
+#else
     PgBackend* backend_;
+#endif
   };
   [[nodiscard]] NodePins pin_nodes() const;
   Err connect_pg(const std::string& conninfo, const std::string& ns);

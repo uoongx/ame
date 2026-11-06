@@ -5,7 +5,6 @@
 
 using namespace ame;
 
-static int failures = 0;
 #define CHECK(cond)                                                    \
   do {                                                                 \
     if (!(cond)) {                                                     \
@@ -23,6 +22,7 @@ static bool recall_has(Engine& e, const char* query, const char* needle) {
 }
 
 int main() {
+  int failures = 0;
   Engine e;
   auto r1 = e.remember_turn("user", "my password is zephyrus", 100);
   auto r2 = e.remember_turn("user", "favorite drink is quokka", 200);

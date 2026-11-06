@@ -542,6 +542,22 @@ jstring recall_json(JNIEnv* env, const ame::RecallResult& result) {
 
 using EventOperation = ame::Err (ame::Engine::*)(const std::string&);
 
+ame::RecallResult recall_events(jlong handle, jlong tenant_handle, const ame::SeedQuery& seeds,
+                                jint limit) {
+  auto session = find_session(handle);
+  if (tenant_handle == 0) {
+    std::lock_guard<std::mutex> lock(session->mutex);
+    require_open(*session);
+    return session->engine.recall(seeds, {}, 2, limit, true);
+  }
+  if (tenant_handle == handle) invalid("Tenant must be a different engine");
+  auto tenant = find_session(tenant_handle);
+  std::scoped_lock lock(session->mutex, tenant->mutex);
+  require_open(*session);
+  require_open(*tenant);
+  return session->engine.recall_with_tenant(tenant->engine, seeds, {}, 2, limit, true);
+}
+
 jboolean change_event(JNIEnv* env, jlong handle, jstring id, EventOperation operation) {
   return boundary<jboolean>(env, JNI_FALSE, [&]() -> jboolean {
     auto uid = from_java(env, id);
@@ -613,18 +629,7 @@ JNIEXPORT jstring JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeRecall(
     ame::SeedQuery seeds;
     seeds.text = from_java(env, query);
     if (seeds.text.empty()) invalid("Recall query must not be empty");
-    auto session = find_session(handle);
-    if (tenant_handle == 0) {
-      std::lock_guard<std::mutex> lock(session->mutex);
-      require_open(*session);
-      return recall_json(env, session->engine.recall(seeds, {}, 2, limit, true));
-    }
-    if (tenant_handle == handle) invalid("Tenant must be a different engine");
-    auto tenant = find_session(tenant_handle);
-    std::scoped_lock lock(session->mutex, tenant->mutex);
-    require_open(*session);
-    require_open(*tenant);
-    return recall_json(env, session->engine.recall_with_tenant(tenant->engine, seeds, {}, 2, limit, true));
+    return recall_json(env, recall_events(handle, tenant_handle, seeds, limit));
   });
 }
 

@@ -46,7 +46,8 @@ public class MainActivity extends AppCompatActivity {
     /** 方案最多灌入记忆图的块数（超大 PDF 的护栏） */
     private static final int GUIDE_MAX_CHUNKS = 300;
 
-    private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final ExecutorService io = Executors.newSingleThreadExecutor(
+            task -> new Thread(task, "ame-session-io"));
     private SessionStore store;
     private SessionAdapter adapter;
     private TextView tvEmpty;

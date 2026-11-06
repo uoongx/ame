@@ -42,7 +42,7 @@
 从仓库根目录运行：
 
 ```sh
-sh android/tests/run-conversation-work-queue-tests.sh
+bash android/tests/run-conversation-work-queue-tests.sh
 ```
 
 ## JNI 接口（`ame_jni/ame_jni.cpp` ↔ `AmeEngine.java`）
