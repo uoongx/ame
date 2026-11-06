@@ -31,10 +31,6 @@ get_filename_component(AME_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 foreach(module core storage time vector keyword extractor entity graph_writer seed diffusion rerank engine)
   add_subdirectory("${AME_ROOT}/${module}" "${CMAKE_CURRENT_BINARY_DIR}/modules/${module}")
 endforeach()
-# Older core headers relied on <string> transitively including integer types.
-# GCC 16 no longer does; keep this compatibility fix scoped to this build.
-target_compile_options(ame_core PRIVATE -include cstdint)
-
 add_library(ame_jni SHARED ame_jni.cpp)
 target_include_directories(ame_jni PRIVATE ${JNI_INCLUDE_DIRS})
 target_link_libraries(ame_jni PRIVATE ame_engine Threads::Threads)

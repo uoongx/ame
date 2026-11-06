@@ -1,6 +1,6 @@
 # AME Java SDK 通用集成指南
 
-本文面向当前源码对应版本的 `com.huawei.convai:convai-ame-java:<version>`（标准主 JAR，无 classifier），运行条件为 Linux x86_64、Java 17+，JNI ABI 1。`<version>` 表示所选 SDK 版本：当前源码版本以 [java/pom.xml](../pom.xml) 的顶层 `version` 为准，已出包版本以交付的 `convai-ame-java.pom` 或 `metadata/build.json` 为准。已有 Java Agent 可在进程内读写长期记忆，不绑定行业、模型供应商或 Web 框架。
+本文面向当前源码对应版本的 `com.huawei.convai:convai-ame-java:<version>`（标准主 JAR，无 classifier），运行条件为 Linux x86_64、Java 17+，JNI ABI 2。`<version>` 表示所选 SDK 版本：当前源码版本以 [java/pom.xml](../pom.xml) 的顶层 `version` 为准，已出包版本以交付的 `convai-ame-java.pom` 或 `metadata/build.json` 为准。已有 Java Agent 可在进程内读写长期记忆，不绑定行业、模型供应商或 Web 框架。
 
 完整方法、参数和 JSON 契约见 [接口参考](API.md)；可编译源码和运行命令见 [示例](../examples/README.md)。provider、回退策略和模型回调属于应用适配层，不是 JAR 自带接口。
 
@@ -20,7 +20,7 @@ AME 提供记忆写入和检索证据，应用继续负责用户鉴权、当前�
 
 从仓库根目录执行 `sh .cloudbuild/build.sh`，在 `build/cloudbuild/artifacts/` 得到 `convai-ame-java-<version>.jar`、`convai-ame-java.pom`、`convai-ame-java-linux-x86_64.tar.gz` 诊断归档和 `SHA256SUMS`。独立 JAR/POM 可直接交给平台制品发布步骤，无需先解包；构建脚本只生成本地产物，不自动 `install` 或 `deploy`。交付 POM 文件名固定，groupId/artifactId 沿用上述坐标，实际版本从 POM 读取，JAR 文件名仍带版本。完整构建、解包与校验命令见 [SDK README](../README.md)。
 
-Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源路径同步迁移；调用方须把 import 改为 `com.huawei.convai.ame.AmeEngine`，并更新反射类名或示例启动类后重新编译。Maven groupId/artifactId 和无 classifier 的构件形式不变，Linux 平台限制、JNI ABI 1 与 `ame.native.path` 属性也不变。若使用外置 SO，应替换为同次构建的 SO；新 JAR 不应混用旧 Java 包对应的 JNI 库。
+Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源路径同步迁移；调用方须把 import 改为 `com.huawei.convai.ame.AmeEngine`，并更新反射类名或示例启动类后重新编译。Maven groupId/artifactId 和无 classifier 的构件形式不变，Linux 平台限制和 `ame.native.path` 属性也不变。若使用外置 SO，应替换为同次构建的 SO；新 JAR 不应混用旧 Java 包对应的 JNI 库。
 
 构建不强制 glibc 2.36，默认记录实际所需符号版本；可显式配置 `AME_MAX_GLIBC` 执行上限检查。面向更老的 Linux 时须使用匹配目标的构建环境重新产包。实际 SO 要求以本次归档 `metadata/build.json` 的 `required_glibc` 及测试日志为准；[Linux 验证记录](LINUX-VALIDATION.md) 保留其历史坐标和 Java 包对应的构建、测试证据。部署前仍需在目标镜像、临时目录权限和数据卷上验收。
 
@@ -150,7 +150,7 @@ SDK 没有异步、deadline 或 cancel 参数。上层 `timeout`/线程中断只
 | 每轮完成后 save | 易理解；每轮承担全量保存时间，成本随历史量增长 |
 | 应用批量/定时 save | 可减少频繁保存；未保存窗口内的数据在崩溃时可能丢失，应用负责调度和关闭 flush |
 
-SDK 当前没有可配置后台 flush、WAL、事务、逐条删除、导出迁移或分布式存储接口；不要把这些策略配置当作已提供功能。`save` 也不承诺断电级 durability；故障恢复要求需在目标存储环境验证。
+SDK 当前没有可配置后台 flush、WAL、事务、导出迁移或分布式存储接口；不要把这些策略配置当作已提供功能。`save` 也不承诺断电级 durability；故障恢复要求需在目标存储环境验证。
 
 ## 8. 最小接入验收
 

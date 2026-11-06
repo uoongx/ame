@@ -40,6 +40,7 @@ public final class AmeEngineBoundaryTest {
     unicodeScalarBoundaries(root);
     failedCloseReleasesDirectory(root);
     concurrentNativeClose(root);
+    concurrentTenantClose(root);
     LOG.info("AME native boundary checks passed: " + root.toAbsolutePath());
   }
 
@@ -210,6 +211,45 @@ public final class AmeEngineBoundaryTest {
     Method method = AmeEngine.class.getDeclaredMethod(name, arguments);
     method.setAccessible(true);
     return method;
+  }
+
+  private static void concurrentTenantClose(Path root) throws Exception {
+    try (AmeEngine session = AmeEngine.open(root.resolve("private"));
+         AmeEngine tenant = AmeEngine.open(root.resolve("shared"))) {
+      tenant.rememberTurn("guide", "tenant walrus", 1, "", "");
+      var start = new CountDownLatch(1);
+      var active = new CountDownLatch(2);
+      var pool = Executors.newFixedThreadPool(3);
+      try {
+        var forward = pool.submit(() -> tenantReads(start, active, session, tenant));
+        var reverse = pool.submit(() -> tenantReads(start, active, tenant, session));
+        start.countDown();
+        check(active.await(10, TimeUnit.SECONDS), "both directions must complete a shared query");
+        tenant.close();
+        forward.get(10, TimeUnit.SECONDS);
+        reverse.get(10, TimeUnit.SECONDS);
+        check(session.recall("walrus", 1).equals("[]"), "closed tenant must stay isolated");
+      } finally {
+        pool.shutdownNow();
+      }
+    }
+  }
+
+  private static Void tenantReads(CountDownLatch start, CountDownLatch active,
+                                  AmeEngine reader, AmeEngine other)
+      throws Exception {
+    start.await();
+    check(reader.recallWithTenant("walrus", 1, other).contains("tenant walrus"), "shared read");
+    active.countDown();
+    for (int i = 0; i < 50; ++i) {
+      try {
+        reader.recallWithTenant("walrus", 1, other);
+      } catch (IllegalStateException closed) {
+        check(closed.getMessage().contains("closed"), "expected a closed tenant handle");
+        break;
+      }
+    }
+    return null;
   }
 
   private static void concurrentNativeClose(Path root) throws Exception {

@@ -1,6 +1,6 @@
 # AME Java SDK 接口参考
 
-本文描述当前源码对应版本的 `com.huawei.convai:convai-ame-java:<version>` API（标准主 JAR，无 classifier），运行条件为 Linux x86_64、Java 17+，AME JNI ABI **1**。`<version>` 表示所选 SDK 版本：当前源码版本以 [java/pom.xml](../pom.xml) 的顶层 `version` 为准，已出包版本以交付的 `convai-ame-java.pom` 或 `metadata/build.json` 为准。接口依据当前 `AmeEngine.java`、JNI 实现及底层引擎核实。
+本文描述当前源码对应版本的 `com.huawei.convai:convai-ame-java:<version>` API（标准主 JAR，无 classifier），运行条件为 Linux x86_64、Java 17+，AME JNI ABI **2**。`<version>` 表示所选 SDK 版本：当前源码版本以 [java/pom.xml](../pom.xml) 的顶层 `version` 为准，已出包版本以交付的 `convai-ame-java.pom` 或 `metadata/build.json` 为准。接口依据当前 `AmeEngine.java`、JNI 实现及底层引擎核实。
 
 Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源路径同步迁移；调用方须更新 import 并重新编译。Maven groupId/artifactId、Linux 平台限制与 `ame.native.path` 属性保持不变，升级时应核对所选版本的接口文档。
 
@@ -10,7 +10,7 @@ Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，JNI 资源路径同�
 
 ## 1. 公共方法一览
 
-以下是该类声明的全部六个公共方法；没有公开构造函数或 SDK 自带的结果 DTO。
+以下是该类的公共方法；没有公开构造函数或 SDK 自带的结果 DTO。
 
 ```java
 public static AmeEngine open(java.nio.file.Path directory);
@@ -21,6 +21,11 @@ public synchronized String rememberTurn(
 
 public synchronized String recall(String query, int limit);
 
+public synchronized String recallWithTenant(String query, int limit, AmeEngine tenant);
+public synchronized boolean blockEvent(String eventId);
+public synchronized boolean unblockEvent(String eventId);
+public synchronized boolean deleteEvent(String eventId);
+public synchronized void clearMemory();
 public synchronized String stats();
 
 public synchronized void save();
@@ -191,6 +196,10 @@ score = 0.5 × graph + 0.3 × context + 0.2 × decay × importance
 
 例如，将上面 53 个 UTF-8 字节的示例文本写入两次，即使使用相同 `messageId`，`turns/events` 都增加 2，`total_chars` 增加 106；`nodes` 的变化依赖实体复用和规则提取，不能由轮数直接推算。
 
+**屏蔽、删除和清空。** 将写入或召回结果中的 `event_id` 传给 `blockEvent`、`unblockEvent` 或 `deleteEvent`。目标事件存在时返回 true，未知 ID 或非事件 ID 返回 false。屏蔽可逆，仅影响召回。删除会移除事件、直接关联的边和来源为该事件的档案槽位。独立写入的摘要、其他事件中的相同文字以及调用方持有的副本有各自的生命周期。`clearMemory()` 清空当前目录对应的整份图和档案，保留配置的词别名。多个业务会话共用目录时会一起清空。上述修改立即作用于当前实例，调用 `save()` 或正常 `close()` 持久化。旧版 SDK 会忽略屏蔽标记。若必须回退，先在新版本删除必须永久隐藏的事件并保存，或由宿主在所有召回路径过滤这些事件。切换前用受隔离的快照副本演练。
+
+**租户共享召回。** 调用 `session.recallWithTenant(query, limit, tenant)`，同时查询两个已打开的独立目录，按事件 ID 去重并按分数合并。传入哪个租户由宿主鉴权决定。本次调用结束即解除关联，后续 `recall()` 仍只查当前实例。关闭任一引擎后调用会抛出 `IllegalStateException`。清理或屏蔽私有库不会修改共享库。
+
 ## 6. `save()`
 
 同步持久化当前实例的全部状态，无参数、无返回值。
@@ -232,7 +241,7 @@ JSON 数字内部使用 `double`。当前序列化器对绝对值小于 `10^15` 
 
 ## 9. 线程、锁与取消
 
-同一 Java 实例的五个操作方法通过 `synchronized` 串行化；JNI 还有每实例 mutex 与共享句柄生命周期保护。同一实例上读、写、保存、关闭不会并行执行。不同目录的独立实例可以由应用并行调用；SDK 没有应用层的实例缓存或用户路由器。
+同一引擎的实例方法通过 `synchronized` 串行化；JNI 还有每实例 mutex 与共享句柄生命周期保护。同一实例上读、写、保存、关闭不会并行执行。不同目录的独立实例可以由应用并行调用；SDK 没有应用层的实例缓存或用户路由器。
 
 每个打开的实例持续持有 `.ame.lock` 的操作系统排他锁，直到关闭或进程退出。磁盘上残留锁文件本身不代表仍被占用。该锁用于协调使用同一约定的引擎，不是租户鉴权或分布式存储协议；网络文件系统需要单独验证其文件锁和替换语义。
 
@@ -242,7 +251,7 @@ JSON 数字内部使用 `double`。当前序列化器对绝对值小于 `10^15` 
 
 ## 10. Java 版本、native ABI 与平台
 
-Java 字节码目标版本是 **17**；AME 的私有 `nativeVersion()` 返回的兼容性版本必须为 **1**，每次 `open()` 都会校验。这里的 ABI 1 不等于 Maven 版本号；底层 `JNI_OnLoad` 使用 JNI 1.8 常量也不代表本 JAR 可运行于 Java 8。不要混用 Android JNI 桥或其他版本的 native 库。
+Java 字节码目标版本是 **17**；AME 的私有 `nativeVersion()` 返回的兼容性版本必须为 **2**，每次 `open()` 都会校验。这里的 ABI 2 不等于 Maven 版本号；底层 `JNI_OnLoad` 使用 JNI 1.8 常量也不代表本 JAR 可运行于 Java 8。不要混用 Android JNI 桥或其他版本的 native 库。
 
 初次加载顺序：
 
@@ -254,8 +263,8 @@ Java 字节码目标版本是 **17**；AME 的私有 `nativeVersion()` 返回的
 java -Dame.native.path=/absolute/path/libame_jni.so -jar your-agent.jar
 ```
 
-该属性须在首次 `open()` 前设置；同一类加载器生命周期只加载一次库，之后改属性不会切换已加载的库。JNI 导出符号随 Java 类名迁移，因此外置 SO 也须替换为同次构建产物；ABI 编号仍为 1 不表示可以复用 `io.ame` 旧库。SDK 不从自定义环境变量或 HTTP 配置读取此值，也不自动下载缺失的库。
+该属性须在首次 `open()` 前设置；同一类加载器生命周期只加载一次库，之后改属性不会切换已加载的库。JNI 导出符号随 Java 类名迁移，因此外置 SO 也须替换为同次构建产物；ABI 2 不兼容 `io.ame` 旧库。SDK 不从自定义环境变量或 HTTP 配置读取此值，也不自动下载缺失的库。
 
 交付文件为 `build/cloudbuild/artifacts/convai-ame-java-<version>.jar` 及同目录的 `convai-ame-java.pom`，版本从这份交付 POM 或归档元数据读取，使用上述标准 Maven 坐标引用，不带 classifier。固定的只是交付 POM 文件名，groupId/artifactId 沿用上述坐标，Maven 仓库仍使用标准带版本布局。构建入口仍是 `sh .cloudbuild/build.sh`，只打包本地产物，不自动 `install` 或 `deploy`；诊断归档和校验步骤见 [SDK README](../README.md)。Linux 运行时还必须满足实际 SO 的 glibc 要求；构建默认不设置版本上限，仅在显式配置 `AME_MAX_GLIBC` 时检查。实际要求以本次归档 `metadata/build.json` 的 `required_glibc` 及测试日志为准，[Linux 验证记录](LINUX-VALIDATION.md) 保留其记录的历史坐标、Java 包与产物证据。版本号和 Java 字节码目标都不能替代目标系统验证。
 
-本文以现有六方法 API 为边界。C++ 内部的注册实体、精确查询、时间过滤、修改权重等能力没有因此自动成为 Java 公共接口；应用适配层的 provider、用户缓存和失败回退也不是 SDK 内置配置项。
+公共接口以本文列出的方法为准。C++ 内部的注册实体、精确查询、时间过滤、修改权重等能力没有因此自动成为 Java 公共接口；应用适配层的 provider、用户缓存和失败回退也不是 SDK 内置配置项。

@@ -15,8 +15,8 @@ import java.util.Objects;
  * their own JSON library. This API does not call a model or accept model credentials.
  */
 public final class AmeEngine implements AutoCloseable {
-  private static final int JNI_VERSION = 1;
-  private long handle;
+  private static final int JNI_VERSION = 2;
+  private volatile long handle;
 
   private AmeEngine(long handle) {
     this.handle = handle;
@@ -68,11 +68,42 @@ public final class AmeEngine implements AutoCloseable {
 
   /** Returns a JSON array of matching events; limit must be between 1 and 100 inclusive. */
   public synchronized String recall(String query, int limit) {
+    return recallFrom(query, limit, 0);
+  }
+
+  /** Combines private and tenant evidence for this query. Both engines must be open. */
+  public synchronized String recallWithTenant(String query, int limit, AmeEngine tenant) {
+    Objects.requireNonNull(tenant, "tenant");
+    if (tenant == this) throw new IllegalArgumentException("Tenant must be a different engine");
+    return recallFrom(query, limit, tenant.requireOpen());
+  }
+
+  private String recallFrom(String query, int limit, long tenantHandle) {
     long current = requireOpen();
     Objects.requireNonNull(query, "query");
     if (query.isBlank()) throw new IllegalArgumentException("query must not be blank");
     if (limit < 1 || limit > 100) throw new IllegalArgumentException("limit must be between 1 and 100");
-    return nativeRecall(current, query, limit);
+    return nativeRecall(current, query, limit, tenantHandle);
+  }
+
+  /** Hides an event from recall. Returns false for an unknown event ID. */
+  public synchronized boolean blockEvent(String eventId) {
+    return nativeBlockEvent(requireOpen(), Objects.requireNonNull(eventId, "eventId"));
+  }
+
+  /** Makes a blocked event eligible for recall again. */
+  public synchronized boolean unblockEvent(String eventId) {
+    return nativeUnblockEvent(requireOpen(), Objects.requireNonNull(eventId, "eventId"));
+  }
+
+  /** Deletes the event, incident edges, and profile slots sourced from it. */
+  public synchronized boolean deleteEvent(String eventId) {
+    return nativeDeleteEvent(requireOpen(), Objects.requireNonNull(eventId, "eventId"));
+  }
+
+  /** Clears the entire open memory store. Persist the change with save() or close(). */
+  public synchronized void clearMemory() {
+    nativeClearMemory(requireOpen());
   }
 
   /** Returns a JSON object containing engine statistics. */
@@ -107,8 +138,9 @@ public final class AmeEngine implements AutoCloseable {
   }
 
   private long requireOpen() {
-    if (handle == 0) throw new IllegalStateException("AME engine is closed");
-    return handle;
+    long current = handle;
+    if (current == 0) throw new IllegalStateException("AME engine is closed");
+    return current;
   }
 
   private static native long nativeOpen(String directory) throws IOException;
@@ -116,7 +148,12 @@ public final class AmeEngine implements AutoCloseable {
   private static native String nativeRememberTurn(
       long handle, String speaker, String text, long epochSeconds, String messageId, String sessionId);
 
-  private static native String nativeRecall(long handle, String query, int limit);
+  private static native String nativeRecall(long handle, String query, int limit, long tenantHandle);
+
+  private static native boolean nativeBlockEvent(long handle, String eventId);
+  private static native boolean nativeUnblockEvent(long handle, String eventId);
+  private static native boolean nativeDeleteEvent(long handle, String eventId);
+  private static native void nativeClearMemory(long handle);
 
   private static native String nativeStats(long handle);
 

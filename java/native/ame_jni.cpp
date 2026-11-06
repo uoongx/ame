@@ -524,6 +524,37 @@ void save(Session& session) {
   }
   fs::rename(temporary, session.snapshot);
 }
+jstring recall_json(JNIEnv* env, const ame::RecallResult& result) {
+  if (result.code != ame::Err::Ok && result.code != ame::Err::NotFound)
+    throw std::runtime_error("AME recall failed");
+  Json response = Json::array();
+  for (const auto& event : result.events) {
+    Json item = Json::object();
+    item["event_id"] = Json::string(event.event->uid);
+    item["text"] = Json::string(event.event->text);
+    item["ts"] = Json::number(static_cast<double>(event.event->ts));
+    item["score"] = Json::number(event.score);
+    item["explain"] = Json::string(event.explain);
+    response.push(std::move(item));
+  }
+  return to_java(env, response.dump());
+}
+
+using EventOperation = ame::Err (ame::Engine::*)(const std::string&);
+
+jboolean change_event(JNIEnv* env, jlong handle, jstring id, EventOperation operation) {
+  return boundary<jboolean>(env, JNI_FALSE, [&]() -> jboolean {
+    auto uid = from_java(env, id);
+    if (uid.empty()) invalid("Event ID must not be empty");
+    auto session = find_session(handle);
+    std::lock_guard<std::mutex> lock(session->mutex);
+    require_open(*session);
+    auto status = (session->engine.*operation)(uid);
+    if (status == ame::Err::NotFound) return JNI_FALSE;
+    if (status != ame::Err::Ok) throw std::runtime_error("Unable to update AME event");
+    return JNI_TRUE;
+  });
+}
 }  // namespace
 
 extern "C" {
@@ -575,29 +606,52 @@ JNIEXPORT jstring JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeRememberTur
   });
 }
 
-JNIEXPORT jstring JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeRecall(JNIEnv* env, jclass, jlong handle, jstring query, jint limit) {
+JNIEXPORT jstring JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeRecall(
+    JNIEnv* env, jclass, jlong handle, jstring query, jint limit, jlong tenant_handle) {
   return boundary<jstring>(env, nullptr, [&] {
     if (limit < 1 || limit > 100) invalid("Recall limit must be between 1 and 100");
     ame::SeedQuery seeds;
     seeds.text = from_java(env, query);
     if (seeds.text.empty()) invalid("Recall query must not be empty");
     auto session = find_session(handle);
+    if (tenant_handle == 0) {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      require_open(*session);
+      return recall_json(env, session->engine.recall(seeds, {}, 2, limit, true));
+    }
+    if (tenant_handle == handle) invalid("Tenant must be a different engine");
+    auto tenant = find_session(tenant_handle);
+    std::scoped_lock lock(session->mutex, tenant->mutex);
+    require_open(*session);
+    require_open(*tenant);
+    return recall_json(env, session->engine.recall_with_tenant(tenant->engine, seeds, {}, 2, limit, true));
+  });
+}
+
+JNIEXPORT jboolean JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeBlockEvent(
+    JNIEnv* env, jclass, jlong handle, jstring uid) {
+  return change_event(env, handle, uid, &ame::Engine::block_event);
+}
+
+JNIEXPORT jboolean JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeUnblockEvent(
+    JNIEnv* env, jclass, jlong handle, jstring uid) {
+  return change_event(env, handle, uid, &ame::Engine::unblock_event);
+}
+
+JNIEXPORT jboolean JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeDeleteEvent(
+    JNIEnv* env, jclass, jlong handle, jstring uid) {
+  return change_event(env, handle, uid, &ame::Engine::delete_event);
+}
+
+JNIEXPORT void JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeClearMemory(
+    JNIEnv* env, jclass, jlong handle) {
+  boundary<int>(env, 0, [&] {
+    auto session = find_session(handle);
     std::lock_guard<std::mutex> lock(session->mutex);
     require_open(*session);
-    auto result = session->engine.recall(seeds, {}, 2, limit, true);
-    if (result.code != ame::Err::Ok && result.code != ame::Err::NotFound)
-      throw std::runtime_error("AME recall failed");
-    Json response = Json::array();
-    for (const auto& event : result.events) {
-      Json item = Json::object();
-      item["event_id"] = Json::string(event.event->uid);
-      item["text"] = Json::string(event.event->text);
-      item["ts"] = Json::number(static_cast<double>(event.event->ts));
-      item["score"] = Json::number(event.score);
-      item["explain"] = Json::string(event.explain);
-      response.push(std::move(item));
-    }
-    return to_java(env, response.dump());
+    if (session->engine.clear_memory() != ame::Err::Ok)
+      throw std::runtime_error("Unable to clear AME memory");
+    return 0;
   });
 }
 
@@ -649,5 +703,5 @@ JNIEXPORT void JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeClose(JNIEnv* 
   });
 }
 
-JNIEXPORT jint JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeVersion(JNIEnv*, jclass) { return 1; }
+JNIEXPORT jint JNICALL Java_com_huawei_convai_ame_AmeEngine_nativeVersion(JNIEnv*, jclass) { return 2; }
 }  // extern "C"

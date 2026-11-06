@@ -47,7 +47,7 @@ docker buildx build --platform linux/amd64 -f java/Dockerfile \
 
 ## 运行条件
 
-当前 SDK 只接受 Linux x86_64 JVM；加载器识别 `amd64/x86_64/x64`。JAR 内唯一 native 资源为 `com/huawei/convai/ame/native/linux-x86_64/libame_jni.so`，JNI ABI 版本仍为 **1**。初次加载先校验平台，再读取外置路径或提取 JAR 资源；显式 `ame.native.path` 也不能绕过平台检查。
+当前 SDK 只接受 Linux x86_64 JVM；加载器识别 `amd64/x86_64/x64`。JAR 内唯一 native 资源为 `com/huawei/convai/ame/native/linux-x86_64/libame_jni.so`，JNI ABI 版本为 **2**。初次加载先校验平台，再读取外置路径或提取 JAR 资源；显式 `ame.native.path` 也不能绕过平台检查。
 
 Linux 运行时需满足本次 SO 的实际 glibc 依赖，SDK 不写死 `2.36`。流水线默认仅检测和记录所需版本；只有显式设置 `AME_MAX_GLIBC` 时才执行符号版本上限检查。实际要求见归档 `metadata/build.json` 的 `required_glibc` 和 ELF 记录。面向旧版 Linux 时，应在匹配最低目标环境的工具链/sysroot 中重新构建，并在目标系统验证；修改上限不会降低二进制依赖，静态链接 C++ 运行库也不会消除 glibc 依赖。默认 Docker 示例使用 Debian 12，旧构建的验证数据见 [Linux 验证记录](docs/LINUX-VALIDATION.md)；Alpine/musl 不在此运行范围。
 
@@ -108,6 +108,7 @@ try (AmeEngine memory = AmeEngine.open(Path.of("data", "visitor-123"))) {
 - `open(Path)` 创建目录或读取快照；坏快照会失败，不会自动清空。
 - `rememberTurn(...)` 返回写入 JSON，例如 `{"code":0,"event_id":"...","resolved_entities":[]}`。String 参数不可为 null；messageId/sessionId 可为空，均为来源标记，不提供幂等或隔离。
 - `recall(query, limit)` 返回包含 `event_id/text/ts/score/explain` 的 JSON 数组；limit 为 1–100，无结果为 `[]`。它返回证据，不生成答案。
+- `blockEvent/unblockEvent/deleteEvent(eventId)` 修改单条事件，`clearMemory()` 清整个目录对应的记忆。调用 `save()` 或 `close()` 持久化。按次共享召回使用 `recallWithTenant(query, limit, tenant)`。
 - `stats()` 返回 `turns/total_chars/events/nodes` JSON；`total_chars` 实际按 UTF-8 字节统计。
 - `save()` 全量持久化；`close()` 保存并释放，可重复调用。关闭后其他操作抛 `IllegalStateException`；关闭保存失败仍释放句柄和锁。
 - I/O 失败使用 `UncheckedIOException`，无效输入使用 `IllegalArgumentException` 或 `NullPointerException`，平台/native/ABI 加载问题使用 `UnsatisfiedLinkError`。

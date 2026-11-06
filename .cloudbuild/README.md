@@ -129,7 +129,7 @@ tar -xzf convai-ame-java-linux-x86_64.tar.gz -C sdk
 
 ## Agent 依赖配置
 
-依赖坐标为 `com.huawei.convai:convai-ame-java:<version>`，消费方选择实际发布版本，主 JAR 不带 classifier，仍只支持 **Linux x86_64**。Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，native 资源同步迁至 `com/huawei/convai/ame/native/linux-x86_64/libame_jni.so`；调用方须更新 import、反射类名或启动类名并重新编译。JNI ABI 仍为 1，外置库属性仍为 `ame.native.path`，但必须使用同次构建的 SO。历史坐标和交付物不覆盖。
+依赖坐标为 `com.huawei.convai:convai-ame-java:<version>`，消费方选择实际发布版本，主 JAR 不带 classifier，仍只支持 **Linux x86_64**。Java 包已从 `io.ame` 迁移至 `com.huawei.convai.ame`，native 资源同步迁至 `com/huawei/convai/ame/native/linux-x86_64/libame_jni.so`；调用方须更新 import、反射类名或启动类名并重新编译。JNI ABI 为 2，外置库属性仍为 `ame.native.path`，但必须使用同次构建的 SO。历史坐标和交付物不覆盖。
 
 版本与交付 POM 一致；`metadata/build.json` 的 `java_package` 字段用于区分 Java 包，消费时还应核对 JAR 校验值，避免误用本地缓存中的旧包产物。
 

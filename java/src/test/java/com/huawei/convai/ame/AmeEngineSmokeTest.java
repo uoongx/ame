@@ -42,8 +42,43 @@ public final class AmeEngineSmokeTest {
       check(reopened.recall(text, 10).contains(text), "saved Unicode turn must survive reopening");
       checkJson(reopened.stats(), '{');
     }
+    verifyForgetting(base.resolve("forget-" + UUID.randomUUID()));
     verifyFailureLifecycle(base.resolve("failure-checks-" + UUID.randomUUID()));
     LOG.info("AME Java/native smoke passed; Unicode snapshot round trip verified");
+  }
+
+  private static void verifyForgetting(Path base) {
+    Path personal = base.resolve("private");
+    Path shared = base.resolve("tenant");
+    String id;
+    try (AmeEngine memory = AmeEngine.open(personal); AmeEngine tenant = AmeEngine.open(shared)) {
+      String write = memory.rememberTurn("user", "private otter", 100, "m1", "s1");
+      var match = java.util.regex.Pattern.compile("\"event_id\":\"([^\"]+)\"").matcher(write);
+      check(match.find(), "event ID is required");
+      id = match.group(1);
+      tenant.rememberTurn("guide", "shared walrus", 100, "m2", "s2");
+      check(memory.blockEvent(id), "event can be blocked");
+      check(!memory.recall("otter", 1).contains("private otter"), "block hides evidence");
+      check(memory.recallWithTenant("walrus", 5, tenant).contains("shared walrus"), "shared recall");
+      check(!memory.recall("walrus", 5).contains("shared walrus"), "private recall isolation");
+    }
+    try (AmeEngine memory = AmeEngine.open(personal)) {
+      check(!memory.recall("otter", 1).contains("private otter"), "block survives reopen");
+      check(memory.unblockEvent(id) && memory.recall("otter", 1).contains("private otter"),
+          "unblock restores the event");
+      check(memory.deleteEvent(id) && !memory.deleteEvent(id), "delete requires an existing event");
+      memory.rememberTurn("user", "a".repeat(23) + "博物馆", 101, "multi", "s2");
+      memory.rememberTurn("user", "second otter", 101, "m2", "s2");
+    }
+    try (AmeEngine memory = AmeEngine.open(personal)) {
+      check(!memory.recall("otter", 5).contains("private otter"), "deleted event stays deleted");
+      check(memory.recall("otter", 5).contains("second otter"), "other events survive deletion");
+      memory.clearMemory();
+    }
+    try (AmeEngine memory = AmeEngine.open(personal); AmeEngine tenant = AmeEngine.open(shared)) {
+      check(memory.recall("otter", 5).equals("[]"), "clear survives reopening");
+      check(tenant.recall("walrus", 5).contains("shared walrus"), "private clear preserves tenant");
+    }
   }
 
   private static void verifyFailureLifecycle(Path root) throws Exception {
