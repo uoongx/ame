@@ -21,6 +21,7 @@
 
 #include "ame/core/uid.h"
 #include "ame/keyword/keyword_manager.h"
+#include "ame/storage/require_write.h"
 #include "ame/storage/storage.h"
 #include "ame/time/time_service.h"
 #include "ame/vector/vector_service.h"
@@ -32,9 +33,16 @@
 namespace ame {
 
 namespace {
+std::string event_title(const std::string& text) {
+  constexpr std::size_t kMaxTitleBytes = 24;
+  if (text.size() <= kMaxTitleBytes) return text;
+  std::size_t end = kMaxTitleBytes;
+  while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0U) == 0x80U) --end;
+  return text.substr(0, end);
+}
+
 void persist_node(Storage& storage, const Node& node) {
-  if (storage.pg_active() && storage.put_node(node) != Err::Ok)
-    throw std::runtime_error("Unable to persist node attributes");
+  if (storage.pg_active()) require_write(storage.put_node(node));
 }
 }  // namespace
 
@@ -69,7 +77,7 @@ std::string GraphWriter::get_or_create_place(const ExtractedPlace& p, bool* crea
   n.geohash = geohash_encode(p.lat, p.lng, 6);
   n.embedding = vec_.embed(p.name);
   if (p.name == "咖啡馆") n.attrs["open_hours"] = "08:00-22:00";
-  storage_.put_node(n);
+  require_write(storage_.put_node(n));
   if (created) *created = true;
 
   // 自动生长③a：IN 边 —— Region 按 geohash 前缀(4)
@@ -83,12 +91,12 @@ std::string GraphWriter::get_or_create_place(const ExtractedPlace& p, bool* crea
     r.uid = gen_uid();
     r.kind = NodeKind::Region;
     r.name = prefix;
-    storage_.put_node(r);
+    require_write(storage_.put_node(r));
     region_uid = r.uid;
   } else {
     region_uid = region->uid;
   }
-  storage_.put_edge(Edge{n.uid, region_uid, RelType::IN, 1.0, {}});
+  require_write(storage_.put_edge(Edge{n.uid, region_uid, RelType::IN, 1.0, {}}));
 
   // 自动生长③b：NEAR 边 —— ≤500m，每点 ≤10 邻居
   auto near = storage_.geo_lookup(p.lat, p.lng, 500.0);
@@ -100,8 +108,8 @@ std::string GraphWriter::get_or_create_place(const ExtractedPlace& p, bool* crea
       continue;
     double d = haversine_m(p.lat, p.lng, other->lat, other->lng);
     double w = 1.0 - d / 500.0;
-    storage_.put_edge(Edge{n.uid, other->uid, RelType::NEAR, w, {}});
-    storage_.put_edge(Edge{other->uid, n.uid, RelType::NEAR, w, {}});
+    require_write(storage_.put_edge(Edge{n.uid, other->uid, RelType::NEAR, w, {}}));
+    require_write(storage_.put_edge(Edge{other->uid, n.uid, RelType::NEAR, w, {}}));
     ++added;
   }
   return n.uid;
@@ -128,13 +136,13 @@ Node GraphWriter::create_event(const Extraction& extraction) {
   ev.uid = gen_uid();
   ev.kind = NodeKind::Event;
   ev.text = extraction.event.text;
-  ev.name = extraction.event.text.substr(0, 24);
+  ev.name = event_title(extraction.event.text);
   ev.type = extraction.event.type;
   ev.ts = extraction.event.time > 0 ? extraction.event.time : TimeService::now_utc();
   ev.precision = extraction.event.precision;
   ev.importance = 0.5;
   ev.embedding = vec_.embed(extraction.event.text);
-  storage_.put_node(ev);
+  require_write(storage_.put_node(ev));
   return ev;
 }
 
@@ -149,7 +157,7 @@ std::vector<std::string> GraphWriter::link_entities(
     entity_uids.push_back(uid);
     auto role = role_of.find(surface);
     std::string value = role == role_of.end() ? "人物" : role->second;
-    storage_.put_edge(Edge{event_uid, uid, RelType::INVOLVES, 1.0, {{"role", value}}});
+    require_write(storage_.put_edge(Edge{event_uid, uid, RelType::INVOLVES, 1.0, {{"role", value}}}));
     result.resolved.emplace_back(surface, uid);
   }
   return entity_uids;
@@ -158,7 +166,7 @@ std::vector<std::string> GraphWriter::link_entities(
 std::string GraphWriter::link_place(const std::string& event_uid, const ExtractedPlace& place) {
   if (place.name.empty()) return "";
   std::string uid = get_or_create_place(place);
-  storage_.put_edge(Edge{event_uid, uid, RelType::HAPPENED_AT, 1.0, {}});
+  require_write(storage_.put_edge(Edge{event_uid, uid, RelType::HAPPENED_AT, 1.0, {}}));
   return uid;
 }
 
@@ -179,8 +187,8 @@ std::vector<std::string> GraphWriter::link_keywords(
     if (uid.empty()) continue;
     if (std::find(keyword_uids.begin(), keyword_uids.end(), uid) != keyword_uids.end()) continue;
     keyword_uids.push_back(uid);
-    storage_.put_edge(Edge{event_uid, uid, RelType::CONTAINS, 1.0,
-                           {{"category", keyword.category}}});
+    require_write(storage_.put_edge(Edge{event_uid, uid, RelType::CONTAINS, 1.0,
+                           {{"category", keyword.category}}}));
     activate_keyword(uid);
   }
   return keyword_uids;
@@ -188,7 +196,7 @@ std::vector<std::string> GraphWriter::link_keywords(
 
 void GraphWriter::link_next(const std::string& event_uid) {
   if (!last_event_uid_.empty() && last_event_uid_ != event_uid && storage_.get_node(last_event_uid_))
-    storage_.put_edge(Edge{last_event_uid_, event_uid, RelType::NEXT, 1.0, {}});
+    require_write(storage_.put_edge(Edge{last_event_uid_, event_uid, RelType::NEXT, 1.0, {}}));
   last_event_uid_ = event_uid;
 }
 
@@ -229,8 +237,8 @@ void GraphWriter::supersede_event(const Node& event, const std::string& previous
   if (!previous) throw std::logic_error("Cannot supersede a missing event: " + previous_uid);
   previous->attrs["valid_to"] = std::to_string(event.ts);
   persist_node(storage_, *previous);
-  storage_.put_edge(Edge{event.uid, previous_uid, RelType::SUPERSEDES, 1.0,
-                         {{"slot", slot}, {"entity", entity_uid}}});
+  require_write(storage_.put_edge(Edge{event.uid, previous_uid, RelType::SUPERSEDES, 1.0,
+                         {{"slot", slot}, {"entity", entity_uid}}}));
 }
 
 void GraphWriter::supersede_pass(const Node& ev, const std::vector<std::string>& entity_uids,
@@ -278,15 +286,15 @@ void GraphWriter::auto_grow(const Node& ev, const std::vector<std::string>& enti
   for (size_t i = 0; i < kw_uids.size(); ++i) {
     for (size_t j = i + 1; j < kw_uids.size(); ++j) {
       Edge e{kw_uids[i], kw_uids[j], RelType::REL_COOCCUR, 1.0, {}};
-      storage_.upsert_edge(e, true);
+      require_write(storage_.upsert_edge(e, true));
       Edge rev{kw_uids[j], kw_uids[i], RelType::REL_COOCCUR, 1.0, {}};
-      storage_.upsert_edge(rev, true);
+      require_write(storage_.upsert_edge(rev, true));
       const Edge* cur = storage_.find_edge(kw_uids[i], kw_uids[j], RelType::REL_COOCCUR);
       if (cur && cur->weight >= 3.0 &&
           !storage_.find_edge(kw_uids[i], kw_uids[j], RelType::REL_PART)) {
         // 成分反复提及 ≥3 次 → 结晶为组成边
-        storage_.put_edge(Edge{kw_uids[j], kw_uids[i], RelType::REL_PART, 0.8,
-                               {{"crystalized_from", "cooccur"}}});
+        require_write(storage_.put_edge(Edge{kw_uids[j], kw_uids[i], RelType::REL_PART, 0.8,
+                               {{"crystalized_from", "cooccur"}}}));
       }
     }
   }
@@ -294,10 +302,10 @@ void GraphWriter::auto_grow(const Node& ev, const std::vector<std::string>& enti
   // ② 同事项实体两两 EXPERIENCED_TOGETHER count+1
   for (size_t i = 0; i < entity_uids.size(); ++i) {
     for (size_t j = i + 1; j < entity_uids.size(); ++j) {
-      storage_.upsert_edge(Edge{entity_uids[i], entity_uids[j],
-                                RelType::EXPERIENCED_TOGETHER, 1.0, {}}, true);
-      storage_.upsert_edge(Edge{entity_uids[j], entity_uids[i],
-                                RelType::EXPERIENCED_TOGETHER, 1.0, {}}, true);
+      require_write(storage_.upsert_edge(Edge{entity_uids[i], entity_uids[j],
+                                RelType::EXPERIENCED_TOGETHER, 1.0, {}}, true));
+      require_write(storage_.upsert_edge(Edge{entity_uids[j], entity_uids[i],
+                                RelType::EXPERIENCED_TOGETHER, 1.0, {}}, true));
     }
   }
 
@@ -370,14 +378,14 @@ std::string GraphWriter::summarize_entity_events(const std::string& uid, TimePoi
   sum.kind = NodeKind::Event;
   sum.type = "summary";
   sum.text = "摘要(" + ent->name + "):" + merged;
-  sum.name = sum.text.substr(0, 24);
+  sum.name = event_title(sum.text);
   sum.ts = latest;
   sum.precision = Precision::Day;
   sum.importance = 0.6;
   sum.embedding = vec_.embed(sum.text);
   sum.attrs["summary_count"] = std::to_string(count);
-  storage_.put_node(sum);
-  storage_.put_edge(Edge{sum.uid, uid, RelType::INVOLVES, 1.0, {{"role", "主体"}}});
+  require_write(storage_.put_node(sum));
+  require_write(storage_.put_edge(Edge{sum.uid, uid, RelType::INVOLVES, 1.0, {{"role", "主体"}}}));
   return sum.uid;
 }
 

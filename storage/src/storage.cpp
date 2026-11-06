@@ -200,40 +200,43 @@ Err Storage::upsert_edge(const Edge& e, bool add_weight) {
   return Err::Ok;
 }
 
+namespace {
+using Adjacency = std::unordered_map<std::string, std::vector<Edge>>;
+
+void unlink_edges(const std::string& uid, Adjacency& links, Adjacency& mirrors, bool outgoing) {
+  auto incident = links.find(uid);
+  if (incident == links.end()) return;
+  for (const auto& edge : incident->second) {
+    auto opposite = mirrors.find(outgoing ? edge.to : edge.from);
+    if (opposite == mirrors.end()) continue;
+    auto& edges = opposite->second;
+    edges.erase(std::remove_if(edges.begin(), edges.end(), [&edge](const Edge& other) {
+      return edge.from == other.from && edge.to == other.to && edge.type == other.type;
+    }), edges.end());
+    if (edges.empty()) mirrors.erase(opposite);
+  }
+  links.erase(incident);
+}
+}  // namespace
+
 Err Storage::delete_node(const std::string& node_id) {
   const std::string uid = node_id;
 #ifdef AME_WITH_POSTGRES
   if (pg_) return pg_->delete_node(uid);
 #endif
-  std::unique_lock lk(mu_);
-  auto it = nodes_.find(uid);
-  if (it == nodes_.end()) return Err::NotFound;
-  std::string key = std::to_string((int)it->second.kind) + "|" + it->second.name;
-  if (auto ni = name_index_.find(key); ni != name_index_.end()) {
-    auto& v = ni->second;
-    v.erase(std::remove(v.begin(), v.end(), uid), v.end());
+  std::unique_lock lock(mu_);
+  auto node = nodes_.find(uid);
+  if (node == nodes_.end()) return Err::NotFound;
+  std::string key = std::to_string(static_cast<int>(node->second.kind)) + "|" + node->second.name;
+  auto name = name_index_.find(key);
+  if (name != name_index_.end()) {
+    auto& ids = name->second;
+    ids.erase(std::remove(ids.begin(), ids.end(), uid), ids.end());
+    if (ids.empty()) name_index_.erase(name);
   }
-  nodes_.erase(it);
-  if (auto oi = out_.find(uid); oi != out_.end()) {
-    for (auto& e : oi->second)
-      if (auto ii = in_.find(e.to); ii != in_.end()) {
-        auto& v = ii->second;
-        v.erase(std::remove_if(v.begin(), v.end(),
-                               [&](const Edge& x) { return x.from == uid && x.type == e.type; }),
-                v.end());
-      }
-    out_.erase(oi);
-  }
-  if (auto ii = in_.find(uid); ii != in_.end()) {
-    for (auto& e : ii->second)
-      if (auto oi = out_.find(e.from); oi != out_.end()) {
-        auto& v = oi->second;
-        v.erase(std::remove_if(v.begin(), v.end(),
-                               [&](const Edge& x) { return x.to == uid && x.type == e.type; }),
-                v.end());
-      }
-    in_.erase(ii);
-  }
+  unlink_edges(uid, out_, in_, true);
+  unlink_edges(uid, in_, out_, false);
+  nodes_.erase(node);
   return Err::Ok;
 }
 
@@ -337,6 +340,7 @@ double Storage::cosine(const Vec& a, const Vec& b) {
 //         （均按相似度降序）；
 //   步骤4：截断到 topk 后返回。
 std::vector<std::pair<std::string, double>> Storage::ann_search(const Vec& embedding, int topk) const {
+  if (topk <= 0) return {};
 #ifdef AME_WITH_POSTGRES
   if (pg_) return pg_->ann_search(embedding, topk);
 #endif

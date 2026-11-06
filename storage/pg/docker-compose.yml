@@ -23,6 +23,6 @@ services:
       bash -ec "apt-get update -qq &&
       apt-get install -y -qq cmake g++ ninja-build libpq-dev postgresql-client &&
       cmake -S . -B build-pg -G Ninja -DAME_WITH_POSTGRES=ON -DCMAKE_BUILD_TYPE=Release &&
-      cmake --build build-pg &&
+      cmake --build build-pg --target test_pg_storage &&
       AME_PG_CONN='host=db dbname=ame user=postgres'
-      ctest --test-dir build-pg --output-on-failure -R ^test_pg_storage$$"
+      ctest --test-dir build-pg --output-on-failure --no-tests=error -R test_pg_storage"

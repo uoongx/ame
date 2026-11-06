@@ -59,28 +59,20 @@ class Engine {
   // data_dir 非空时启用 M11 反馈日志与 M14 配置目录
   explicit Engine(const std::string& data_dir = "");
 
-  // 4.0：启用 PostgreSQL 存储后端（构造后、写入前调用；ns 为 session 隔离命名空间）。
-  // 需以 AME_WITH_POSTGRES 编译，否则返回 Internal；成功后 recall/remember 全走 SQL。
+  // Select a dedicated PostgreSQL namespace before writing any data.
   Err open_postgres(const std::string& conninfo, const std::string& ns = "default") {
     return storage_.connect_pg(conninfo, ns);
   }
 
-  // 4.0 租户共享记忆：attach 后本 session 的 recall 自动合并租户引擎证据
-  // （非拥有指针，生命周期由调用方保证；共同记忆写入直接调 tenant->remember_turn，
-  // 仍各自 ns 隔离存储；lookup/实体档案等其它动词保持 session 私有）。
-  void attach_tenant(Engine* tenant) { tenant_ = tenant; }
-  void detach_tenant() { tenant_ = nullptr; }
+  // C++ callers serialize access to engines and their attachments.
+  Err attach_tenant(Engine* tenant);
+  void detach_tenant() { tenant_.reset(); }
 
-  // ⑧ 条目级遗忘（4.0）：block=屏蔽（可逆，数据保留，recall 不再返回）；
-  // unblock 解除；delete_event=删除（节点+全部关联边，不可恢复）。
-  // session 级清空：PG 用 from_json(空)（clear_ns），内存/手机端删 graph.json。
   Err block_event(const std::string& uid);
   Err unblock_event(const std::string& uid);
   Err delete_event(const std::string& uid);
-
-  // session 级清空（4.0）：清图 + 实体档案槽位（PG=clear_ns，内存=清空邻接表/索引）。
-  // 别名表视为配置保留；调用方负责另行删除持久化文件（Android 由 JNI 删 graph.json）。
-  void clear_memory();
+  // Clear this whole instance, preserving configured keyword aliases.
+  Err clear_memory();
 
   // ① 注册实体
   std::string register_entity(const std::string& type, const std::string& name,
@@ -116,12 +108,17 @@ class Engine {
   RecallResult recall(const SeedQuery& seeds, const RecallFilters& filters = {},
                       int depth = 2, int limit = 20, bool explain = true);
 
+  // Merge only the two specified stores, regardless of other attachments.
+  RecallResult recall_with_tenant(Engine& tenant, const SeedQuery& seeds,
+                                  const RecallFilters& filters, int depth, int limit, bool explain);
+
   // ⑥ 纠错
   Err merge_entities(const std::string& uid_a, const std::string& into_b);
   std::string split_entity(const std::string& uid, const std::vector<std::string>& mention_ids);
 
   // ⑦ 实体档案：身份 + 当前/历史槽位 + 时间线（设计文档第八节）
   EntityProfile get_entity_profile(const std::string& uid) const {
+    auto pins = storage_.pin_nodes();
     return entity_.get_profile(uid);
   }
 
@@ -137,6 +134,7 @@ class Engine {
     long nodes = 0;
   };
   EngineStats stats() const {
+    auto pins = storage_.pin_nodes();
     EngineStats s;
     s.nodes = (long)storage_.node_count();
     for (auto* n : storage_.nodes_of_kind(NodeKind::Event)) {
@@ -162,7 +160,12 @@ class Engine {
 
  private:
   Storage storage_;
-  Engine* tenant_ = nullptr;  // 4.0 租户知识库（非拥有；attach_tenant 注入）
+  // Borrowed links expire when their engine is destroyed.
+  std::shared_ptr<Engine*> identity_ = std::make_shared<Engine*>(this);
+  std::weak_ptr<Engine*> tenant_;
+  RecallResult recall_local(const SeedQuery& seeds, const RecallFilters& filters,
+                           int depth, int limit, bool explain);
+  Err set_event_blocked(const std::string& uid, bool blocked);
   VectorService vector_;
   TimeService time_;
   KeywordManager keyword_;

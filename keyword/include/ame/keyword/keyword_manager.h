@@ -75,7 +75,8 @@ class KeywordManager {
   const Node* find(const std::string& standard_word) const;
 
  private:
-  Node* find_mutable(const std::string& standard_word);
+  void store_keyword(const Node& node);
+  void set_status(const std::string& word, int status);
   Storage& storage_;
   std::unordered_map<std::string, std::string> alias_;  // alias -> standard
   std::unordered_set<std::string> builtin_standards_;   // 内置标准词（不可被词典改写）

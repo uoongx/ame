@@ -26,6 +26,7 @@
 #include "ame/core/types.h"
 #include "ame/diffusion/diffusion_engine.h"
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,7 @@ struct ScoredEvent {
   double graph_score = 0, context_score = 0, time_score = 0;
   Path path;
   std::string explain;
+  std::shared_ptr<const Node> retained;  // Snapshot of a selected engine result.
 };
 
 struct FusionWeights {

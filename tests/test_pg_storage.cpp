@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <stdexcept>
 
 using namespace ame;
 
@@ -22,6 +23,35 @@ static Vec vec128(float a, float b) {
   v[0] = a;
   v[1] = b;
   return v;
+}
+
+static bool has_original_embedding(Storage& storage) {
+  const Node* event = storage.get_node("ev1");
+  return event && event->embedding.size() == 128;
+}
+
+static void verify_rollback(Storage& storage, const Json& snap) {
+  // Roll back both SQL tables and retain the original name index and cache
+  // when pgvector rejects a node midway through a replacement.
+  if (snap.find("nodes") == nullptr || snap.find("nodes")->arr.empty()) {
+    CHECK(false);
+    return;
+  }
+  Json invalid = snap;
+  auto& row = invalid["nodes"].arr.back();
+  row["embedding"] = Json::array();
+  row["embedding"].push(Json::number(1.0));
+  CHECK(storage.from_json(invalid) == Err::IoError);
+  CHECK(storage.node_count() == 3 && storage.edge_count() == 1);
+  CHECK(storage.find_by_name(NodeKind::Entity, "Caroline") != nullptr);
+  CHECK(has_original_embedding(storage));
+
+  Node* edit = storage.get_node_mut("ev1");
+  if (edit) {
+    edit->embedding.resize(1);
+    CHECK(storage.put_node(*edit) == Err::IoError);
+    CHECK(has_original_embedding(storage));
+  }
 }
 
 static void storage_roundtrip(const std::string& conn, const std::string& prefix) {
@@ -77,24 +107,7 @@ static void storage_roundtrip(const std::string& conn, const std::string& prefix
   CHECK(st2.node_count() == 3 && st2.edge_count() == 1);
   CHECK(st2.find_by_name(NodeKind::Entity, "Caroline") != nullptr);
 
-  // Roll back both SQL tables and retain the original name index and cache
-  // when pgvector rejects a node midway through a replacement.
-  Json invalid = snap;
-  auto& row = invalid["nodes"].arr.back();
-  row["embedding"] = Json::array();
-  row["embedding"].push(Json::number(1.0));
-  CHECK(st2.from_json(invalid) == Err::IoError);
-  CHECK(st2.node_count() == 3 && st2.edge_count() == 1);
-  CHECK(st2.find_by_name(NodeKind::Entity, "Caroline") != nullptr);
-  CHECK(st2.get_node("ev1")->embedding.size() == 128);
-
-  Node* edit = st2.get_node_mut("ev1");
-  if (edit) {
-    edit->embedding.resize(1);
-    CHECK(st2.put_node(*edit) == Err::IoError);
-    CHECK(st2.get_node("ev1")->embedding.size() == 128);
-  }
-
+  verify_rollback(st2, snap);
   CHECK(st2.from_json(Json::object()) == Err::Ok);
   CHECK(st2.node_count() == 0);
 
@@ -136,6 +149,23 @@ static void bounded_cache(const std::string& conn, const std::string& prefix) {
   CHECK(st3.from_json(Json::object()) == Err::Ok);
   CHECK(st3.pg_index_size() == 0 && st3.pg_cache_size() == 0);
   unsetenv("AME_PG_CACHE_NODES");
+}
+
+static void required_write_failure(const std::string& connection, const std::string& prefix) {
+  Engine engine;
+  CHECK(engine.open_postgres(connection, prefix + "reject") == Err::Ok);
+  if (!engine.storage().pg_active()) return;
+  // PostgreSQL text cannot store an embedded NUL. The caller must observe a
+  // failure when a required graph write rejects the original turn.
+  bool failed = false;
+  try {
+    auto result = engine.remember_turn("user", std::string("before\0after", 12), 123);
+    failed = result.code != Err::Ok;
+  } catch (const std::runtime_error&) {
+    failed = true;
+  }
+  CHECK(failed);
+  CHECK(engine.clear_memory() == Err::Ok);
 }
 
 static void shared_graph(const std::string& conn, const std::string& prefix) {
@@ -187,6 +217,7 @@ int main() {
   storage_roundtrip(connection, prefix);
   bounded_cache(connection, prefix);
   shared_graph(connection, prefix);
+  required_write_failure(connection, prefix);
 
   if (failures == 0) std::printf("PASS test_pg_storage\n");
   return failures == 0 ? 0 : 1;

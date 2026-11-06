@@ -46,7 +46,36 @@ static void test_fuse_and_filters() {
   CHECK_NEAR(out2[0].score, 1.0, 1e-6);  // 纯图扩散分（事件级归一）
 }
 
+static void test_blocked_event_is_hidden_before_limit() {
+  Storage storage;
+  TimeService time(&storage);
+  VectorService vectors(&storage);
+  Reranker reranker(storage, time, vectors);
+  Node hidden, visible;
+  hidden.uid = "hidden";
+  hidden.kind = NodeKind::Event;
+  hidden.text = "private evidence";
+  hidden.attrs["blocked"] = "1";
+  visible.uid = "visible";
+  visible.kind = NodeKind::Event;
+  visible.text = "public evidence";
+  CHECK(storage.put_node(hidden) == Err::Ok);
+  CHECK(storage.put_node(visible) == Err::Ok);
+  DiffusionResult diff;
+  diff[hidden.uid].energy = 2.0;
+  diff[visible.uid].energy = 1.0;
+  Path path;
+  path.steps.push_back({hidden.uid, visible.uid, RelType::NEXT});
+  diff[visible.uid].paths.push_back(path);
+  auto result = reranker.rerank(diff, {}, {}, 1);
+  CHECK(result.size() == 1);
+  if (result.empty()) return;
+  CHECK(result.front().event->uid == visible.uid);
+  CHECK(result.front().explain.find(hidden.text) == std::string::npos);
+}
+
 int main() {
   test_fuse_and_filters();
+  test_blocked_event_is_hidden_before_limit();
   return AME_TEST_REPORT();
 }

@@ -95,17 +95,19 @@ static std::string trunc_utf8(const std::string& s, size_t max_bytes) {
 //          b. 两端显示名均按 UTF-8 码点边界截断到 24 字节；
 //          c. 拼接 "from -[关系名]-> to"，边之间以 "  →  " 连接；
 //   步骤3：返回拼好的完整链路串。
+static std::string explain_name(const Node* node) {
+  if (!node) return "?";
+  if (node->attrs.count("blocked")) return "[blocked]";
+  return trunc_utf8(node->name.empty() ? node->text : node->name, 24);
+}
+
 std::string Reranker::make_explain(const Path& p) const {
   if (p.steps.empty()) return "直接命中（种子节点）";
   std::string s;
   for (size_t i = 0; i < p.steps.size(); ++i) {
     const Node* from = storage_.get_node(p.steps[i].from);
     const Node* to = storage_.get_node(p.steps[i].to);
-    std::string fn = from ? (from->name.empty() ? from->text : from->name) : "?";
-    std::string tn = to ? (to->name.empty() ? to->text : to->name) : "?";
-    fn = trunc_utf8(fn, 24);
-    tn = trunc_utf8(tn, 24);
-    s += fn + " -[" + rel_name(p.steps[i].type) + "]-> " + tn;
+    s += explain_name(from) + " -[" + rel_name(p.steps[i].type) + "]-> " + explain_name(to);
     if (i + 1 < p.steps.size()) s += "  →  ";
   }
   return s;
@@ -136,14 +138,14 @@ std::vector<ScoredEvent> Reranker::rerank(const DiffusionResult& diff, const Vec
   double max_energy = 0;
   for (auto& [uid, ne] : diff) {
     const Node* n = storage_.get_node(uid);
-    if (n && n->kind == NodeKind::Event) max_energy = std::max(max_energy, ne.energy);
+    if (n && n->kind == NodeKind::Event && !n->attrs.count("blocked")) max_energy = std::max(max_energy, ne.energy);
   }
   if (max_energy <= 0) max_energy = 1.0;
 
   std::vector<ScoredEvent> out;
   for (auto& [uid, ne] : diff) {
     const Node* n = storage_.get_node(uid);
-    if (!n || n->kind != NodeKind::Event) continue;
+    if (!n || n->kind != NodeKind::Event || n->attrs.count("blocked")) continue;
     if (!pass_filters(*n, filters)) continue;
 
     double graph = ne.energy / max_energy;

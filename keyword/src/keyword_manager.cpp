@@ -141,15 +141,17 @@ const Node* KeywordManager::find(const std::string& standard_word) const {
   return storage_.find_by_name(NodeKind::Keyword, standard_word);
 }
 
-// Missing terms are normal; losing an indexed node before mutation is an invariant failure.
-// This follows Storage's pointer lifetime contract, without concurrent mutation safety.
-Node* KeywordManager::find_mutable(const std::string& standard_word) {
-  const Node* found = find(standard_word);
-  if (!found) return nullptr;
-  const std::string uid = found->uid;
-  Node* node = storage_.get_node_mut(uid);
-  if (!node) throw std::logic_error("Indexed keyword node is missing: " + uid);
-  return node;
+void KeywordManager::store_keyword(const Node& node) {
+  if (storage_.put_node(node) != Err::Ok) throw std::runtime_error("Unable to store keyword");
+}
+
+void KeywordManager::set_status(const std::string& word, int status) {
+  auto pins = storage_.pin_nodes();
+  const Node* found = find(normalize(word));
+  if (!found || found->status == status) return;
+  Node updated = *found;
+  updated.status = status;
+  store_keyword(updated);
 }
 
 // get_or_create 伪代码：
@@ -167,15 +169,17 @@ std::string KeywordManager::get_or_create(const std::string& word, const std::st
   std::string std_word = normalize(word);
   if (is_stopword(std_word) || std_word.empty()) return "";
 
-  Node* m = find_mutable(std_word);
-  if (m) {
-    m->mention_count++;
+  auto pins = storage_.pin_nodes();
+  if (const Node* found = find(std_word)) {
+    Node updated = *found;
+    ++updated.mention_count;
     // 唤醒：计数达到阈值且有边连接
-    if (m->status == 1 && m->mention_count >= 3 &&
-        !storage_.neighbors(m->uid).empty()) {
-      m->status = 0;
+    if (updated.status == 1 && updated.mention_count >= 3 &&
+        !storage_.neighbors(updated.uid).empty()) {
+      updated.status = 0;
     }
-    return m->uid;
+    store_keyword(updated);
+    return updated.uid;
   }
 
   Node n;
@@ -185,7 +189,7 @@ std::string KeywordManager::get_or_create(const std::string& word, const std::st
   n.type = category;
   n.mention_count = 1;
   n.status = 1;  // 新词默认休眠（出现<3 且无边），后续边连接/计数增长时唤醒
-  storage_.put_node(n);
+  store_keyword(n);
   if (created) *created = true;
   return n.uid;
 }
@@ -199,6 +203,7 @@ std::string KeywordManager::get_or_create(const std::string& word, const std::st
 //   步骤5：返回正向边的写入结果。
 Err KeywordManager::link_related(const std::string& a, const std::string& b, RelType type,
                                  double weight) {
+  auto pins = storage_.pin_nodes();
   const Node* na = find(normalize(a));
   const Node* nb = find(normalize(b));
   if (!na || !nb) return Err::NotFound;
@@ -229,14 +234,12 @@ std::vector<const Node*> KeywordManager::list_keywords(const std::string& catego
 
 // 手动休眠：归一后找到节点则置 status=1，未找到则静默忽略。
 void KeywordManager::sleep_keyword(const std::string& word) {
-  Node* node = find_mutable(normalize(word));
-  if (node) node->status = 1;
+  set_status(word, 1);
 }
 
 // 手动唤醒：归一后找到节点则置 status=0，未找到则静默忽略。
 void KeywordManager::wake_keyword(const std::string& word) {
-  Node* node = find_mutable(normalize(word));
-  if (node) node->status = 0;
+  set_status(word, 0);
 }
 
 // 休眠判定：按 uid 取节点，仅当节点存在、为 Keyword 类型且 status==1 时返回 true。

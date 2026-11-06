@@ -1,8 +1,3 @@
-/*
- * 4.0：条目级遗忘（内存后端）——block/unblock/delete_event 语义测试。
- * 覆盖：屏蔽可逆（recall 不再返回但数据保留）、删除（节点+关联边清除）、
- *       删除后 recall 不再命中、重复删除返回 NotFound。
- */
 #include "ame/engine/engine.h"
 
 #include <cstdio>
@@ -35,23 +30,46 @@ int main() {
   CHECK(recall_has(e, "zephyrus", "zephyrus"));
   CHECK(recall_has(e, "quokka", "quokka"));
 
-  // 屏蔽：recall 不再返回，但数据保留（可逆）
+
   CHECK(e.block_event(r1.event_id) == Err::Ok);
   CHECK(!recall_has(e, "zephyrus", "zephyrus"));
-  CHECK(recall_has(e, "quokka", "quokka"));  // 其它条目不受影响
-  CHECK(e.storage().get_node(r1.event_id) != nullptr);  // 屏蔽≠删除
+  CHECK(recall_has(e, "quokka", "quokka"));
+  CHECK(e.storage().get_node(r1.event_id) != nullptr);
   CHECK(e.unblock_event(r1.event_id) == Err::Ok);
-  CHECK(recall_has(e, "zephyrus", "zephyrus"));  // 解除后恢复
+  CHECK(recall_has(e, "zephyrus", "zephyrus"));
 
-  // 删除：节点+关联边清除，不可恢复
+
   size_t before = e.storage().node_count();
+  if (r1.resolved_entities.empty()) return 1;
+  const auto owner = r1.resolved_entities.front().second;
+  CHECK(e.entities().put_slot(owner, "trip", "old", 100, r1.event_id) == Err::Ok);
+  CHECK(e.entities().put_slot(owner, "food", "tea", 200, r2.event_id) == Err::Ok);
   CHECK(e.delete_event(r1.event_id) == Err::Ok);
   CHECK(!recall_has(e, "zephyrus", "zephyrus"));
   CHECK(e.storage().get_node(r1.event_id) == nullptr);
   CHECK(e.storage().node_count() == before - 1);
-  CHECK(e.delete_event(r1.event_id) == Err::NotFound);  // 重复删除
+  CHECK(e.get_entity_profile(owner).current_slot("trip").empty());
+  CHECK(e.get_entity_profile(owner).current_slot("food") == "tea");
+  CHECK(e.delete_event(r1.event_id) == Err::NotFound);
   CHECK(recall_has(e, "quokka", "quokka"));
 
-  if (failures == 0) std::printf("PASS test_forget（条目屏蔽/删除 全断言通过）\n");
+  auto entity = e.register_entity("person", "Unaffiliated");
+  CHECK(e.delete_event(entity) == Err::NotFound);
+  CHECK(e.block_event(entity) == Err::NotFound);
+  SeedQuery private_query;
+  private_query.text = "quokka";
+  auto retained = e.recall(private_query);
+  CHECK(!retained.events.empty());
+  {
+    Engine tenant;
+    CHECK(e.attach_tenant(&tenant) == Err::Ok);
+    CHECK(tenant.attach_tenant(&e) == Err::InvalidArg);
+    CHECK(e.attach_tenant(&e) == Err::InvalidArg);
+  }
+  CHECK(recall_has(e, "quokka", "quokka"));
+  CHECK(e.clear_memory() == Err::Ok);
+  CHECK(!retained.events.empty() && retained.events.front().event->kind == NodeKind::Event);
+  CHECK(e.stats().events == 0);
+  if (failures == 0) std::printf("PASS test_forget\n");
   return failures == 0 ? 0 : 1;
 }

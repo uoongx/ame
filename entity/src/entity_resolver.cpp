@@ -25,6 +25,7 @@
 #include "ame/entity/entity_resolver.h"
 
 #include "ame/core/uid.h"
+#include "ame/storage/require_write.h"
 #include "ame/storage/storage.h"
 #include "ame/vector/vector_service.h"
 
@@ -64,8 +65,8 @@ std::string EntityResolver::register_entity(const std::string& type, const std::
   n.type = type;
   n.embedding = vec_.embed(name + " " + type);
   for (auto& kv : identifiers) n.attrs["id:" + kv.first] = kv.second;
-  storage_.put_node(n);
-  for (auto& a : aliases) add_alias(n.uid, a);
+  require_write(storage_.put_node(n));
+  for (const auto& alias : aliases) require_write(add_alias(n.uid, alias));
   return n.uid;
 }
 
@@ -82,7 +83,7 @@ Err EntityResolver::add_alias(const std::string& uid, const std::string& surface
   a.kind = NodeKind::Alias;
   a.name = surface;
   a.attrs["target"] = real;
-  storage_.put_node(a);
+  if (const Err saved = storage_.put_node(a); saved != Err::Ok) return saved;
   return storage_.put_edge(Edge{a.uid, real, RelType::ALIAS_OF, 1.0, {}});
 }
 
@@ -117,9 +118,9 @@ std::string EntityResolver::create_mention(const std::string& surface,
   m.uid = gen_uid();
   m.kind = NodeKind::Mention;
   m.name = surface;
-  storage_.put_node(m);
-  storage_.put_edge(Edge{m.uid, entity_uid, RelType::REFERS_TO, confidence,
-                         {{"confidence", std::to_string(confidence)}}});
+  require_write(storage_.put_node(m));
+  require_write(storage_.put_edge(Edge{m.uid, entity_uid, RelType::REFERS_TO, confidence,
+                         {{"confidence", std::to_string(confidence)}}}));
   return m.uid;
 }
 
@@ -230,8 +231,7 @@ ResolveResult EntityResolver::resolve_candidates(const std::string& surface,
     Node* created = storage_.get_node_mut(rr.uid);
     if (!created) throw std::logic_error("Newly registered entity is missing: " + rr.uid);
     created->attrs["suspected_dup_of"] = best->uid;
-    if (storage_.pg_active() && storage_.put_node(*created) != Err::Ok)
-      throw std::runtime_error("Unable to persist duplicate entity metadata");
+    if (storage_.pg_active()) require_write(storage_.put_node(*created));
   }
   rr.mention_uid = create_mention(surface, rr.uid, rr.confidence);
   return rr;
@@ -312,7 +312,7 @@ Err EntityResolver::merge_entities(const std::string& uid_a, const std::string& 
     if (ne.from == a) ne.from = b;
     if (ne.to == a) ne.to = b;
     if (ne.from == ne.to) continue;
-    storage_.put_edge(ne);
+    if (const Err saved = storage_.put_edge(ne); saved != Err::Ok) return saved;
   }
   redirect_[a] = b;  // 旧 uid 保留跳转
   return Err::Ok;
@@ -334,7 +334,7 @@ std::string EntityResolver::split_entity(const std::string& uid,
   for (auto& mid : mention_ids) {
     const Node* m = storage_.get_node(mid);
     if (!m || m->kind != NodeKind::Mention) continue;
-    storage_.put_edge(Edge{mid, new_uid, RelType::REFERS_TO, 1.0, {{"split_from", real}}});
+    require_write(storage_.put_edge(Edge{mid, new_uid, RelType::REFERS_TO, 1.0, {{"split_from", real}}}));
   }
   return new_uid;
 }

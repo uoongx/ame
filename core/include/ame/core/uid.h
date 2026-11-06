@@ -7,6 +7,7 @@
  * 依赖关系：仅依赖标准库；被需要新建节点标识的模块（graph_writer M4、storage M9 等）使用。
  */
 #pragma once
+#include <cstdint>
 #include <string>
 
 namespace ame {

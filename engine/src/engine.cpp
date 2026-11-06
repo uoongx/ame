@@ -47,6 +47,7 @@ Engine::Engine(const std::string& data_dir)
 std::string Engine::register_entity(const std::string& type, const std::string& name,
                                     const Attrs& identifiers,
                                     const std::vector<std::string>& aliases) {
+  auto pins = storage_.pin_nodes();
   return entity_.register_entity(type, name, identifiers, aliases);
 }
 
@@ -70,6 +71,7 @@ RememberResult Engine::remember(const std::string& text) {
 // 步骤3：调用 M4 图写入器落库（M3 关键词归一在 writer 内部完成）
 // 步骤4：把 WriteResult 转换为 RememberResult 返回（错误码、事件 id、实体映射）
 RememberResult Engine::remember_event(const Extraction& ex_in) {
+  auto pins = storage_.pin_nodes();
   // 值副本：人名/专名归一域（--name-alias）需为命中别名表的称呼/昵称 surface 增补
   // canonical 关键词——否则称呼轮（"老X/小X"提取出的实体）只有 INVOLVES 实体锚点、
   // 不经实体种子不可达；alias_of 未命中时 ex 与 ex_in 内容一致，行为不变。
@@ -149,6 +151,7 @@ RememberResult Engine::remember_turn(const std::string& speaker, const std::stri
 RememberResult Engine::remember_turn_ex(Extraction ex, const std::string& speaker, TimePoint ts,
                                         const std::string& dia_id,
                                         const std::string& session_id) {
+  auto pins = storage_.pin_nodes();
   if (ex.event.text.empty()) {
     RememberResult r;
     r.code = Err::InvalidArg;
@@ -170,7 +173,7 @@ RememberResult Engine::remember_turn_ex(Extraction ex, const std::string& speake
       if (!dia_id.empty()) ev->attrs["dia_id"] = dia_id;
       if (!session_id.empty()) ev->attrs["session_id"] = session_id;
       if (!speaker.empty()) ev->attrs["speaker"] = speaker;
-      storage_.put_node(*ev);  // 4.0：PG 写穿（内存模式为同值覆盖，无副作用）
+      r.code = storage_.put_node(*ev);
     }
   }
   return r;
@@ -229,6 +232,7 @@ void order_lookup(std::vector<const Node*>& events, const std::string& order_by)
 }  // namespace
 
 std::vector<const Node*> Engine::lookup(const LookupQuery& q) const {
+  auto pins = storage_.pin_nodes();
   std::vector<const Node*> out;
   // A non-positive limit cannot produce results; avoid signed-to-size_t resize overflow.
   if (q.limit <= 0) return out;
@@ -250,6 +254,7 @@ std::vector<const Node*> Engine::lookup(const LookupQuery& q) const {
 //          仅当 valid_to > as_of（as_of 时刻仍有效）时保留；
 //   步骤3：保持原排序返回。
 std::vector<const Node*> Engine::lookup_as_of(LookupQuery q, TimePoint as_of) const {
+  auto pins = storage_.pin_nodes();
   q.current_only = false;  // as_of 语义自行判定有效性，不走 current_only 捷径
   std::vector<const Node*> base = lookup(q);
   std::vector<const Node*> out;
@@ -267,6 +272,7 @@ std::vector<const Node*> Engine::lookup_as_of(LookupQuery q, TimePoint as_of) co
 //   步骤2：按时间戳升序排序（NEXT 链与写入顺序在 ts 上天然一致，ts 相同按 uid 稳定次序）；
 //   步骤3：返回全局先后序列。
 std::vector<std::string> Engine::order_events(const std::vector<std::string>& uids) const {
+  auto pins = storage_.pin_nodes();
   std::vector<const Node*> evs;
   for (auto& u : uids) {
     const Node* n = storage_.get_node(u);
@@ -286,84 +292,107 @@ std::vector<std::string> Engine::order_events(const std::vector<std::string>& ui
 // 步骤3：软重排——若查询带文本则用 M13 生成查询向量，连同过滤条件交给 M7 重排并截断到 limit
 // 步骤4：若 explain 为假，清空每条结果的可解释信息
 // 步骤5：若 M11 反馈采集器已启用，记录本次查询及结果 uid 列表，回填 query_id 埋点
-RecallResult Engine::recall(const SeedQuery& sq, const RecallFilters& filters, int depth,
-                            int limit, bool explain) {
-  RecallResult rr;
-  // ① 软入口 M5 → ② 硬扩散 M6 → ③ 软重排 M7（无种子时跳过，仍可走租户知识库）
+RecallResult Engine::recall_local(const SeedQuery& sq, const RecallFilters& filters, int depth,
+                                 int limit, bool explain) {
+  auto pins = storage_.pin_nodes();
+  RecallResult result;
+  if (limit <= 0) return result;
   SeedSet seeds = seed_.gen_seeds(sq);
   if (seeds.empty()) {
-    rr.code = Err::NotFound;
-    rr.msg = "无种子命中";
-  } else {
-    // （3.0：束搜索与 M14 门控随反馈/学习一并裁剪，恒 BFS 规则传导）
-    std::vector<DiffusionSeed> ds;
-    for (auto& s : seeds) ds.push_back({s.node_uid, s.weight});
-    DiffusionResult dr = diffusion_.diffuse(ds, depth);
-    Vec qemb = sq.text.empty() ? Vec{} : vector_.embed(sq.text);
-    rr.events = rerank_.rerank(dr, qemb, filters, limit);
-    if (!explain)
-      for (auto& e : rr.events) e.explain.clear();
-    // 条目屏蔽过滤（4.0）：blocked 节点不再注入回答（数据保留，可 unblock）
-    rr.events.erase(std::remove_if(rr.events.begin(), rr.events.end(),
-                                   [](const ScoredEvent& e) {
-                                     return e.event && e.event->attrs.count("blocked");
-                                   }),
-                    rr.events.end());
+    result.code = Err::NotFound;
+    result.msg = "No matching seeds";
+    return result;
   }
-  // ④ 租户知识库合并（4.0）：session 私有证据 + 租户共享证据按分融合去重
-  if (tenant_) {
-    RecallResult tr = tenant_->recall(sq, filters, depth, limit, explain);
-    if (!tr.events.empty()) {
-      std::unordered_set<std::string> seen;
-      std::vector<ScoredEvent> merged;
-      merged.reserve(rr.events.size() + tr.events.size());
-      for (auto& e : rr.events)
-        if (e.event && seen.insert(e.event->uid).second) merged.push_back(e);
-      for (auto& e : tr.events)
-        if (e.event && seen.insert(e.event->uid).second) merged.push_back(e);
-      std::stable_sort(merged.begin(), merged.end(),
-                       [](const ScoredEvent& a, const ScoredEvent& b) { return a.score > b.score; });
-      if (limit > 0 && merged.size() > (size_t)limit) merged.resize((size_t)limit);
-      rr.events = std::move(merged);
-      rr.code = Err::Ok;
-      rr.msg.clear();
-    }
+  std::vector<DiffusionSeed> entries;
+  for (const auto& seed : seeds) entries.push_back({seed.node_uid, seed.weight});
+  auto diffusion = diffusion_.diffuse(entries, depth);
+  Vec embedding = sq.text.empty() ? Vec{} : vector_.embed(sq.text);
+  result.events = rerank_.rerank(diffusion, embedding, filters, limit);
+  for (auto& event : result.events) {
+    event.retained = std::make_shared<Node>(*event.event);
+    event.event = event.retained.get();
+    if (!explain) event.explain.clear();
   }
-  return rr;
+  return result;
 }
 
-// ⑧ 条目级遗忘（4.0）：屏蔽=attrs["blocked"] 标记（可逆），删除=节点+关联边移除
-Err Engine::block_event(const std::string& uid) {
-  Node* n = storage_.get_node_mut(uid);
-  if (!n) return Err::NotFound;
-  n->attrs["blocked"] = "1";
-  return storage_.put_node(*n);  // PG 写穿
+Err Engine::attach_tenant(Engine* tenant) {
+  if (!tenant) return Err::InvalidArg;
+  for (Engine* current = tenant; current;) {
+    if (current == this) return Err::InvalidArg;
+    const auto next = current->tenant_.lock();
+    current = next ? *next : nullptr;
+  }
+  tenant_ = tenant->identity_;
+  return Err::Ok;
 }
 
-Err Engine::unblock_event(const std::string& uid) {
-  Node* n = storage_.get_node_mut(uid);
-  if (!n) return Err::NotFound;
-  n->attrs.erase("blocked");
-  return storage_.put_node(*n);
+RecallResult Engine::recall(const SeedQuery& query, const RecallFilters& filters, int depth,
+                           int limit, bool explain) {
+  auto tenant = tenant_.lock();
+  if (tenant) return recall_with_tenant(**tenant, query, filters, depth, limit, explain);
+  return recall_local(query, filters, depth, limit, explain);
 }
 
-Err Engine::delete_event(const std::string& uid) { return storage_.delete_node(uid); }
-
-// session 级清空：图（PG=clear_ns，内存=清 nodes/邻接表/名字索引）+ 档案槽位
-void Engine::clear_memory() {
-  Json empty = Json::object();
-  storage_.from_json(empty);
-  entity_.slots_from_json(empty);
+RecallResult Engine::recall_with_tenant(Engine& tenant, const SeedQuery& query,
+                                       const RecallFilters& filters, int depth, int limit,
+                                       bool explain) {
+  auto result = recall_local(query, filters, depth, limit, explain);
+  if (&tenant == this || limit <= 0) return result;
+  auto shared = tenant.recall_local(query, filters, depth, limit, explain);
+  if (shared.events.empty()) return result;
+  std::unordered_set<std::string> seen;
+  for (const auto& item : result.events) seen.insert(item.event->uid);
+  for (auto& item : shared.events) {
+    if (seen.insert(item.event->uid).second) result.events.push_back(std::move(item));
+  }
+  std::stable_sort(result.events.begin(), result.events.end(),
+                   [](const ScoredEvent& a, const ScoredEvent& b) { return a.score > b.score; });
+  if (result.events.size() > static_cast<size_t>(limit)) result.events.resize(limit);
+  result.code = Err::Ok;
+  result.msg.clear();
+  return result;
 }
 
-// 直通 M2 实体解析器：把 uid_a 合并进 into_b
+Err Engine::set_event_blocked(const std::string& uid, bool blocked) {
+  auto pins = storage_.pin_nodes();
+  const Node* node = storage_.get_node(uid);
+  if (!node || node->kind != NodeKind::Event) return Err::NotFound;
+  Node updated = *node;
+  if (blocked) updated.attrs["blocked"] = "1";
+  else updated.attrs.erase("blocked");
+  return storage_.put_node(updated);
+}
+
+Err Engine::block_event(const std::string& uid) { return set_event_blocked(uid, true); }
+Err Engine::unblock_event(const std::string& uid) { return set_event_blocked(uid, false); }
+
+Err Engine::delete_event(const std::string& uid) {
+  auto pins = storage_.pin_nodes();
+  const Node* node = storage_.get_node(uid);
+  if (!node || node->kind != NodeKind::Event) return Err::NotFound;
+  Err result = storage_.delete_node(uid);
+  if (result == Err::Ok) entity_.forget_event_slots(uid);
+  return result;
+}
+
+Err Engine::clear_memory() {
+  Err result = storage_.from_json(Json::object());
+  if (result != Err::Ok) return result;
+  entity_.clear_memory();
+  writer_.reset_history();
+  return Err::Ok;
+}
+
 Err Engine::merge_entities(const std::string& uid_a, const std::string& into_b) {
+  auto pins = storage_.pin_nodes();
   return entity_.merge_entities(uid_a, into_b);
 }
 
 // 直通 M2 实体解析器：把指定提及从实体中拆出，返回新实体 uid
 std::string Engine::split_entity(const std::string& uid,
                                  const std::vector<std::string>& mention_ids) {
+  auto pins = storage_.pin_nodes();
   return entity_.split_entity(uid, mention_ids);
 }
 
